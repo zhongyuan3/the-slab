@@ -1,0 +1,14 @@
+[package]
+name = "the-slab"
+version = "0.1.0"
+edition = "2024"
+description = "A no_std reimplementation of the Linux kernel's SLUB-style slab allocator"
+license = "MIT"
+rust-version = "1.85"
+
+[dependencies]
+the-buddy-system = { path = "../the-buddy-system", version = "0.1.0" }
+the-memblock = { path = "../the-memblock/the-memblock", version = "0.2.0" }
+
+[dev-dependencies]
+the-memblock = { path = "../the-memblock/the-memblock", version = "0.2.0" }
