@@ -7,7 +7,7 @@ license = "MIT"
 rust-version = "1.85"
 
 [dependencies]
-the-buddy-system = { path = "../the-buddy-system", version = "0.1.0" }
+the-buddy-system = { path = "../the-buddy-system/the-buddy-system", version = "0.1.0" }
 the-memblock = { path = "../the-memblock/the-memblock", version = "0.2.0" }
 
 [dev-dependencies]
