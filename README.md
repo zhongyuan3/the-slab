@@ -26,6 +26,10 @@ one active slab (`cpu_slab`) plus a doubly linked partial list
 - SLUB algorithms and states: `calculate_order`/`calculate_sizes` layout,
   in-object free lists, active slab + partial list, `min_partial`, and
   `alloc_zeroed`.
+- A `kmalloc` facade: `KmallocCaches` creates one cache per size class
+  (`kmalloc_info`), serves larger requests straight from the page
+  allocator (`kmalloc_large`), and provides `kmalloc`/`kzalloc`/`kfree`
+  (pointer inference)/`ksize`/`krealloc`.
 - `try_alloc_cached`, the allocator-free fast path a kernel runs without
   the zone lock; all other methods take `&mut self` and leave locking to
   the caller.
@@ -71,6 +75,36 @@ cache.free(&mut pages, object).unwrap();
 cache.destroy(&mut pages).unwrap();
 ```
 
+## kmalloc facade
+
+`KmallocCaches` mirrors the kernel's size-class API on top of the same
+page allocator. It is defined in place and initialized once, and `kfree`
+finds the owning cache or large block from the pointer alone:
+
+```rust
+use the_slab::KmallocCaches;
+
+let mut kmalloc = KmallocCaches::uninit();
+kmalloc.init(&pages).unwrap();
+
+let object = kmalloc.kmalloc(&mut pages, 100).unwrap();
+assert!(kmalloc.ksize(&pages, object).unwrap() >= 100);
+kmalloc.kfree(&mut pages, object).unwrap();
+
+// Larger requests bypass the slabs and use the page allocator directly.
+let block = kmalloc.kzalloc(&mut pages, 5000).unwrap();
+kmalloc.kfree(&mut pages, block).unwrap();
+
+kmalloc.shrink(&mut pages).unwrap();
+kmalloc.destroy(&mut pages).unwrap();
+```
+
+Every kmalloc slab is exactly one page, so `kfree` can page-align the
+pointer to reach the slab header; requests that would need a multi-page
+slab (the kernel's two-page `kmalloc-4k`/`kmalloc-8k` on 4 KiB pages) go
+through the large path instead, where a tag at the page-aligned base of
+the block records the allocation order.
+
 ## Boot handoff
 
 The intended kernel sequence is `memblock` → buddy → slab: reserve the
@@ -101,8 +135,8 @@ comments in the source:
 - slab coloring — `TODO(color)`
 - `SLAB_POISON`/red zones and full object checking — `TODO(poison)`
 - constructors and destructors — `TODO(ctor)`
-- `kmalloc` size classes, `kfree` and the large allocation path —
-  `TODO(kmalloc)`
+- multi-page kmalloc classes; the kernel's two-page `kmalloc-4k` and
+  `kmalloc-8k` are served by the large path — `TODO(kmalloc)`
 
 ## License
 

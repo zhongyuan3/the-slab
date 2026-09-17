@@ -15,6 +15,14 @@ All notable changes to this project are documented in this file.
 - SLUB layout math (`calculate_order`/`calculate_sizes`): object stride,
   header offset, order selection with `min_objects` relaxation, and
   pointer-alignment raising.
+- `KmemCache::init_with_min_objects` for an explicit per-slab object
+  target (SLUB's `slub_min_objects`).
+- `KmallocCaches`, the `kmalloc` size-class facade: one cache per
+  `kmalloc_info` class, `kmalloc`/`kzalloc`/`kfree` (pointer inference)/
+  `ksize`/`krealloc`, and the large path straight through the page
+  allocator with an order tag at the base of the block. Every kmalloc
+  slab is one page, so `kfree` finds the cache by page-aligning the
+  pointer.
 - In-object free lists (`set_freepointer`), the active slab plus doubly
   linked partial list, and `min_partial` empty-slab policy.
 - `PageAlloc`/`PhysMap` abstractions with a `DirectMap` linear mapping and

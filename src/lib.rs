@@ -71,8 +71,10 @@
 //! - `mm/slub.c`: `calculate_order`, `calculate_sizes`,
 //!   `set_freepointer`/`get_freepointer`, `allocate_slab`, `__slab_alloc`,
 //!   `get_partial`, `slab_free`, `kmem_cache_shrink`, `kmem_cache_destroy`
-//! - `include/linux/slab.h`: `kmem_cache_alloc`, `kmem_cache_free`
+//! - `include/linux/slab.h`: `kmem_cache_alloc`, `kmem_cache_free`,
+//!   `kmalloc`, `kzalloc`, `kfree`, `ksize`, `krealloc`
 //! - `include/linux/slub_def.h`: `struct kmem_cache`, `min_partial`
+//! - `mm/slab_common.c`: `kmalloc_info`, `create_kmalloc_caches`
 //!
 //! # Roadmap
 //!
@@ -84,13 +86,14 @@
 //! - `TODO(color)`: slab coloring to spread objects across cache lines.
 //! - `TODO(poison)`: `SLAB_POISON`/red zones and full object checking.
 //! - `TODO(ctor)`: constructors and destructors.
-//! - `TODO(kmalloc)`: size classes, `kmalloc`/`kfree`, and the large
-//!   allocation path through the page allocator.
+//! - `TODO(kmalloc)`: multi-page kmalloc classes; the kernel's two-page
+//!   `kmalloc-4k`/`kmalloc-8k` are served by the large path here.
 
 #![no_std]
 
 pub use crate::cache::KmemCache;
 pub use crate::error::Error;
+pub use crate::kmalloc::KmallocCaches;
 pub use crate::layout::SlabLayout;
 pub use crate::pages::BuddyPages;
 pub use crate::pages::DirectMap;
@@ -99,6 +102,7 @@ pub use crate::pages::PhysMap;
 
 pub mod cache;
 pub mod error;
+pub mod kmalloc;
 pub mod layout;
 pub mod pages;
 

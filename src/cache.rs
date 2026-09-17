@@ -25,8 +25,9 @@
 //! [`KmemCache::free`].
 //! TODO(ctor): support constructors and destructors in
 //! [`KmemCache::init`] and `new_slab`.
-//! TODO(kmalloc): add the size-class facade (`KmemCacheSet`), `kfree`
-//! inference and the large-allocation path through the page allocator.
+//! TODO(kmalloc): support multi-page kmalloc classes; the class facade in
+//! `crate::kmalloc` keeps every kmalloc slab on a single page so that
+//! `kfree` can find the cache from a pointer.
 
 use core::mem::size_of;
 use core::ptr::NonNull;
@@ -134,6 +135,28 @@ impl KmemCache {
         size: usize,
         align: usize,
     ) -> Result<(), Error> {
+        self.init_with_min_objects(pages, name, size, align, MIN_OBJECTS)
+    }
+
+    /// Like [`KmemCache::init`], but with an explicit `min_objects` target
+    /// (SLUB's `slub_min_objects`) instead of the default of four.
+    ///
+    /// [`KmallocCaches`](crate::kmalloc::KmallocCaches) passes `1` so that
+    /// every kmalloc slab stays on a single page, which its `kfree` relies
+    /// on to find the owning cache from an object pointer.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`KmemCache::init`]. `min_objects` must be at least one.
+    pub fn init_with_min_objects<PA: PageAlloc>(
+        &mut self,
+        pages: &PA,
+        name: &'static str,
+        size: usize,
+        align: usize,
+        min_objects: usize,
+    ) -> Result<(), Error> {
+        debug_assert!(min_objects >= 1, "at least one object per slab is required");
         if self.is_initialized() {
             return Err(Error::AlreadyInitialized);
         }
@@ -144,7 +167,7 @@ impl KmemCache {
             align,
             pages.page_size(),
             pages.max_order(),
-            MIN_OBJECTS,
+            min_objects,
         )?;
 
         // The block size must be expressible in the address type used to
