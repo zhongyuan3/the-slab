@@ -21,8 +21,9 @@ one active slab (`cpu_slab`) plus a doubly linked partial list
   `ObjectCache::init`, following the same `uninit`/`init` pattern as the
   buddy allocator.
 - Kernel-shaped layers: `ObjectCache` over a `PageAlloc` abstract
-  (`BuddyPages` adapts the buddy allocator), over a `PhysMap`
-  (`DirectMap` covers the common direct-map case).
+  (`BuddyPages` borrows the buddy allocator, `Zone` owns it so the page
+  allocator itself can live in a `static`), over a `PhysMap` (`DirectMap`
+  covers the common direct-map case and is also `static`-friendly).
 - SLUB algorithms and states: `calculate_order`/`calculate_sizes` layout,
   in-object free lists, active slab + partial list, `min_partial`, and
   `alloc_zeroed`.
@@ -104,6 +105,33 @@ pointer to reach the slab header; requests that would need a multi-page
 slab (the kernel's two-page `kmalloc-4k`/`kmalloc-8k` on 4 KiB pages) go
 through the large path instead, where a tag at the page-aligned base of
 the block records the allocation order.
+
+## Page allocator statics
+
+Caches and the kernel heap are typically statics, while `BuddyPages`
+borrows the buddy allocator and therefore cannot be one. `Zone` owns a
+buddy arena plus its `DirectMap`, so the page allocator can be a static
+too:
+
+```rust
+use std::sync::Mutex;
+use the_slab::Zone;
+
+static ZONE: Mutex<Zone<usize, 11>> = Mutex::new(Zone::uninit());
+static CACHE: Mutex<the_slab::ObjectCache> = Mutex::new(the_slab::ObjectCache::uninit());
+
+// After memory discovery, once the vmemmap is mapped:
+let mut zone = ZONE.lock().unwrap();
+// SAFETY: the descriptors and the mapping are valid for the rest of the
+// system, and all access goes through the lock.
+unsafe { zone.init(vmemmap, nr_pages, base, page_size, virt_base) }.unwrap();
+zone.buddy_mut().free_memblock(&memblock).unwrap();
+drop(zone);
+
+// Caches borrow the zone for the duration of each call.
+CACHE.lock().unwrap().init(&*ZONE.lock().unwrap(), "widgets", 24, 8).unwrap();
+let object = CACHE.lock().unwrap().alloc(&mut *ZONE.lock().unwrap()).unwrap();
+```
 
 ## Boot handoff
 

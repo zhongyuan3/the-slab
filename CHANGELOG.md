@@ -28,6 +28,11 @@ All notable changes to this project are documented in this file.
 - `PageAlloc`/`PhysMap` abstractions with a `DirectMap` linear mapping and
   a `BuddyPages` adapter over the buddy allocator; `Send` so caches can be
   wrapped in a lock.
+- `Zone`, a self-contained page allocator that owns a `Buddy<'static>`
+  arena plus its `DirectMap` (`uninit`/`init`, `from_raw_parts`,
+  `buddy`/`buddy_mut`), so the page allocator itself can live in a
+  `static` while caches borrow it per call. `DirectMap` gained
+  `uninit`/`init`/`is_initialized` for the same reason.
 - Error detection for invalid objects, foreign-cache frees, double frees
   (best effort), corrupted slabs and accounting mismatches.
 - Unit, integration (`memblock` → buddy → slab) and documentation tests,

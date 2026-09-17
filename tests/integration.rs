@@ -13,6 +13,7 @@ use the_slab::DirectMap;
 use the_slab::Error;
 use the_slab::KernelHeap;
 use the_slab::ObjectCache;
+use the_slab::Zone;
 
 const PAGE: usize = 0x1000;
 const PAGES: usize = 64;
@@ -346,4 +347,90 @@ fn heap_can_be_defined_in_a_static() {
     let guard = HEAP.lock().unwrap();
     assert!(!guard.is_initialized());
     assert!(guard.cache(0).is_none());
+}
+
+#[test]
+fn static_zone_object_cache_and_heap_share_the_page_allocator() {
+    // Everything a kernel keeps for the whole system lives in statics: the
+    // zone (page allocator), an object cache and the kernel heap.
+    static ZONE: Mutex<Zone<usize, MAX_ORDER>> = Mutex::new(Zone::uninit());
+    static CACHE: Mutex<ObjectCache> = Mutex::new(ObjectCache::uninit());
+    static STATIC_HEAP: Mutex<KernelHeap> = Mutex::new(KernelHeap::uninit());
+
+    // The descriptors and the backing memory must outlive the static zone.
+    // The descriptors are leaked (they are reachable through the zone),
+    // and the memory owner is forgotten at the end of the test so the
+    // backing allocation stays alive as well.
+    let descriptors: &'static mut [Page] =
+        Box::leak(vec![Page::EMPTY; PAGES].into_boxed_slice());
+    let memory = Memory::new(PAGES);
+    let base = memory.base();
+    let ptr = NonNull::new(descriptors.as_mut_ptr()).unwrap();
+
+    {
+        let mut zone = ZONE.lock().unwrap();
+        assert!(!zone.is_initialized());
+        // SAFETY: the leaked descriptors and backing memory live for the
+        // rest of the process, and all access goes through the lock.
+        unsafe { zone.init(ptr, PAGES, base, PAGE, memory.ptr) }.unwrap();
+        zone.buddy_mut()
+            .free_range(base, base + PAGES * PAGE)
+            .unwrap();
+        assert_eq!(zone.buddy().nr_free(), PAGES);
+    }
+
+    // The caches borrow the zone for the duration of each call only;
+    // `&*guard` hands out the `Zone` behind the mutex. Lock order follows
+    // the kernel: cache first, then zone.
+    {
+        let mut cache = CACHE.lock().unwrap();
+        let mut heap = STATIC_HEAP.lock().unwrap();
+        let zone = ZONE.lock().unwrap();
+        cache.init(&*zone, "static", 24, 8).unwrap();
+        heap.init(&*zone).unwrap();
+    }
+
+    let object = CACHE
+        .lock()
+        .unwrap()
+        .alloc(&mut *ZONE.lock().unwrap())
+        .unwrap();
+    assert_eq!(object.as_ptr() as usize % 8, 0);
+
+    let block = STATIC_HEAP
+        .lock()
+        .unwrap()
+        .alloc(&mut *ZONE.lock().unwrap(), 200)
+        .unwrap();
+    assert!(
+        STATIC_HEAP
+            .lock()
+            .unwrap()
+            .usable_size(&*ZONE.lock().unwrap(), block)
+            .unwrap()
+            >= 200
+    );
+
+    CACHE
+        .lock()
+        .unwrap()
+        .free(&mut *ZONE.lock().unwrap(), object)
+        .unwrap();
+    STATIC_HEAP
+        .lock()
+        .unwrap()
+        .free(&mut *ZONE.lock().unwrap(), block)
+        .unwrap();
+
+    // Every empty slab goes back to the zone.
+    let mut cache = CACHE.lock().unwrap();
+    let mut heap = STATIC_HEAP.lock().unwrap();
+    let mut zone = ZONE.lock().unwrap();
+    cache.shrink(&mut *zone).unwrap();
+    assert_eq!(cache.nr_slabs(), 0);
+    heap.shrink(&mut *zone).unwrap();
+    assert_eq!(zone.buddy().nr_free(), PAGES);
+
+    // The backing allocation stays alive through the zone's mapping.
+    core::mem::forget(memory);
 }

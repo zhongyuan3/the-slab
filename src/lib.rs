@@ -74,6 +74,7 @@
 //! - `include/linux/slab.h`: `kmem_cache_alloc`, `kmem_cache_free`,
 //!   `kmalloc`, `kzalloc`, `kfree`, `ksize`, `krealloc`
 //! - `include/linux/slub_def.h`: `struct kmem_cache`, `min_partial`
+//! - `include/linux/mmzone.h`: `struct zone`
 //! - `mm/slab_common.c`: `kmalloc_info`, `create_kmalloc_caches`
 //!
 //! # Roadmap
@@ -99,6 +100,7 @@ pub use crate::pages::BuddyPages;
 pub use crate::pages::DirectMap;
 pub use crate::pages::PageAlloc;
 pub use crate::pages::PhysMap;
+pub use crate::pages::Zone;
 
 pub mod cache;
 pub mod error;
