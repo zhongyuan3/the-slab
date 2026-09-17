@@ -14,7 +14,7 @@ pub(crate) const SLAB_MAGIC: u32 = 0x5AB0_9001;
 /// in-use count, the identity of the owning cache and the partial list
 /// links.
 ///
-/// `magic` is deliberately the first field: `KmallocCaches::kfree` reads
+/// `magic` is deliberately the first field: `KernelHeap::free` reads
 /// the first word of the page containing a pointer to tell a slab block
 /// (this header) from a large allocation tag, so the two tag layouts must
 /// start with the same magic field.

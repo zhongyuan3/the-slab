@@ -10,14 +10,14 @@ pub enum Error {
     /// The page allocator has no free block of the requested order.
     OutOfMemory,
     /// An operation that needs a layout was attempted before
-    /// [`KmemCache::init`].
+    /// [`ObjectCache::init`].
     ///
-    /// [`KmemCache::init`]: crate::cache::KmemCache::init
+    /// [`ObjectCache::init`]: crate::cache::ObjectCache::init
     Uninitialized,
-    /// [`KmemCache::init`] was called on a cache that is already
+    /// [`ObjectCache::init`] was called on a cache that is already
     /// initialized.
     ///
-    /// [`KmemCache::init`]: crate::cache::KmemCache::init
+    /// [`ObjectCache::init`]: crate::cache::ObjectCache::init
     AlreadyInitialized,
     /// The object size is zero or smaller than a free list pointer.
     InvalidObjectSize,
@@ -52,8 +52,8 @@ impl core::fmt::Display for Error {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         let s = match self {
             Error::OutOfMemory => "Out of memory",
-            Error::Uninitialized => "Slab cache is not initialized",
-            Error::AlreadyInitialized => "Slab cache is already initialized",
+            Error::Uninitialized => "Object cache is not initialized",
+            Error::AlreadyInitialized => "Object cache is already initialized",
             Error::InvalidObjectSize => "Invalid object size",
             Error::InvalidAlign => "Invalid alignment",
             Error::InvalidPageSize => "Invalid page size",
@@ -93,11 +93,11 @@ mod tests {
         assert_eq!(Error::OutOfMemory.to_string().as_str(), "Out of memory");
         assert_eq!(
             Error::Uninitialized.to_string().as_str(),
-            "Slab cache is not initialized"
+            "Object cache is not initialized"
         );
         assert_eq!(
             Error::AlreadyInitialized.to_string().as_str(),
-            "Slab cache is already initialized"
+            "Object cache is already initialized"
         );
         assert_eq!(
             Error::InvalidObjectSize.to_string().as_str(),

@@ -1,7 +1,7 @@
 //! A `no_std` reimplementation of the Linux kernel's SLUB-style slab
 //! allocator (`mm/slub.c`), layered on top of the buddy page allocator.
 //!
-//! Each [`KmemCache`] manages fixed-size objects carved out of page blocks
+//! Each [`ObjectCache`] manages fixed-size objects carved out of page blocks
 //! requested from a [`PageAlloc`]. A slab block starts with a slab header
 //! and is followed by objects on an aligned stride; free objects store the
 //! next free list pointer inside themselves, exactly like SLUB's
@@ -12,7 +12,7 @@
 //! # Layering
 //!
 //! ```text
-//! KmemCache::alloc/free            kmem_cache_alloc / kmem_cache_free
+//! ObjectCache::alloc/free            kmem_cache_alloc / kmem_cache_free
 //!     |
 //! PageAlloc (BuddyPages)           alloc_pages / __free_pages
 //!     |
@@ -24,7 +24,7 @@
 //! [`BuddyPages`] pairs a [`Buddy`](the_buddy_system::Buddy) allocator with
 //! a [`DirectMap`], so a kernel only has to supply its direct-map offset.
 //! Locking stays with the caller, as in the buddy crate: the cache core is
-//! `&mut self`, and [`KmemCache::try_alloc_cached`] is the
+//! `&mut self`, and [`ObjectCache::try_alloc_cached`] is the
 //! allocator-free fast path.
 //!
 //! # Examples
@@ -37,7 +37,7 @@
 //! use the_buddy_system::Page;
 //! use the_slab::BuddyPages;
 //! use the_slab::DirectMap;
-//! use the_slab::KmemCache;
+//! use the_slab::ObjectCache;
 //!
 //! const PAGE: usize = 0x1000;
 //! const PAGES: usize = 64;
@@ -57,7 +57,7 @@
 //! let map = unsafe { DirectMap::new(base, memory) };
 //! let mut pages = BuddyPages::new(&mut buddy, map);
 //!
-//! let mut cache = KmemCache::uninit();
+//! let mut cache = ObjectCache::uninit();
 //! cache.init(&pages, "widgets", 24, 8).unwrap();
 //!
 //! let object = cache.alloc(&mut pages).unwrap();
@@ -91,9 +91,9 @@
 
 #![no_std]
 
-pub use crate::cache::KmemCache;
+pub use crate::cache::ObjectCache;
 pub use crate::error::Error;
-pub use crate::kmalloc::KmallocCaches;
+pub use crate::heap::KernelHeap;
 pub use crate::layout::SlabLayout;
 pub use crate::pages::BuddyPages;
 pub use crate::pages::DirectMap;
@@ -102,7 +102,7 @@ pub use crate::pages::PhysMap;
 
 pub mod cache;
 pub mod error;
-pub mod kmalloc;
+pub mod heap;
 pub mod layout;
 pub mod pages;
 

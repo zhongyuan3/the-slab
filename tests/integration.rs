@@ -11,8 +11,8 @@ use the_memblock::memblock::Memblock;
 use the_slab::BuddyPages;
 use the_slab::DirectMap;
 use the_slab::Error;
-use the_slab::KmemCache;
-use the_slab::KmallocCaches;
+use the_slab::KernelHeap;
+use the_slab::ObjectCache;
 
 const PAGE: usize = 0x1000;
 const PAGES: usize = 64;
@@ -63,7 +63,7 @@ fn slab_over_buddy_end_to_end() {
     let map = unsafe { DirectMap::new(base, memory.ptr) };
     let mut pages = BuddyPages::new(&mut buddy, map);
 
-    let mut cache = KmemCache::uninit();
+    let mut cache = ObjectCache::uninit();
     cache.init(&pages, "widgets", 24, 8).unwrap();
 
     // Allocate a large run and check the objects are distinct, aligned and
@@ -118,7 +118,7 @@ fn boot_handoff_from_memblock_to_slab() {
         let map = unsafe { DirectMap::new(base, memory.ptr) };
         let mut pages = BuddyPages::new(&mut buddy, map);
 
-        let mut cache = KmemCache::uninit();
+        let mut cache = ObjectCache::uninit();
         cache.init(&pages, "handoff", 128, 8).unwrap();
 
         // Allocate until the arena is exhausted; the reserved kernel range
@@ -145,7 +145,7 @@ fn boot_handoff_from_memblock_to_slab() {
 }
 
 /// A cache defined in a static, as a kernel would.
-static CACHE: Mutex<KmemCache> = Mutex::new(KmemCache::uninit());
+static CACHE: Mutex<ObjectCache> = Mutex::new(ObjectCache::uninit());
 
 #[test]
 fn cache_can_be_defined_in_a_static() {
@@ -155,7 +155,7 @@ fn cache_can_be_defined_in_a_static() {
 }
 
 #[test]
-fn kmalloc_across_classes_roundtrip() {
+fn heap_across_classes_roundtrip() {
     const MEMORY_PAGES: usize = 128;
     let memory = Memory::new(MEMORY_PAGES);
     let base = memory.base();
@@ -168,15 +168,15 @@ fn kmalloc_across_classes_roundtrip() {
         let map = unsafe { DirectMap::new(base, memory.ptr) };
         let mut pages = BuddyPages::new(&mut buddy, map);
 
-        let mut kmalloc = KmallocCaches::uninit();
-        kmalloc.init(&pages).unwrap();
+        let mut heap = KernelHeap::uninit();
+        heap.init(&pages).unwrap();
 
         // Requests up to the largest single-page class come from slabs.
         let mut live = Vec::new();
         for &size in &[1usize, 8, 9, 64, 96, 100, 192, 256, 1024, 2048] {
             for round in 0..4u8 {
-                let object = kmalloc.kmalloc(&mut pages, size).unwrap();
-                let usable = kmalloc.ksize(&pages, object).unwrap();
+                let object = heap.alloc(&mut pages, size).unwrap();
+                let usable = heap.usable_size(&pages, object).unwrap();
                 assert!(usable >= size);
                 // SAFETY: the object owns `usable` writable bytes.
                 unsafe { object.as_ptr().write_bytes(round, usable) };
@@ -188,20 +188,20 @@ fn kmalloc_across_classes_roundtrip() {
         addresses.sort_unstable();
         addresses.dedup();
         assert_eq!(addresses.len(), live.len());
-        kmalloc.validate(&pages).unwrap();
+        heap.validate(&pages).unwrap();
 
         for object in live {
-            kmalloc.kfree(&mut pages, object).unwrap();
+            heap.free(&mut pages, object).unwrap();
         }
-        kmalloc.validate(&pages).unwrap();
+        heap.validate(&pages).unwrap();
 
-        kmalloc.shrink(&mut pages).unwrap();
-        for index in 0..KmallocCaches::classes().len() {
-            if let Some(cache) = kmalloc.cache(index) {
+        heap.shrink(&mut pages).unwrap();
+        for index in 0..KernelHeap::classes().len() {
+            if let Some(cache) = heap.cache(index) {
                 assert_eq!(cache.nr_slabs(), 0);
             }
         }
-        kmalloc.destroy(&mut pages).unwrap();
+        heap.destroy(&mut pages).unwrap();
     }
 
     // Every page went back to the buddy allocator.
@@ -209,7 +209,7 @@ fn kmalloc_across_classes_roundtrip() {
 }
 
 #[test]
-fn kmalloc_large_uses_the_page_allocator() {
+fn heap_large_uses_the_page_allocator() {
     const MEMORY_PAGES: usize = 64;
     let memory = Memory::new(MEMORY_PAGES);
     let base = memory.base();
@@ -222,29 +222,29 @@ fn kmalloc_large_uses_the_page_allocator() {
         let map = unsafe { DirectMap::new(base, memory.ptr) };
         let mut pages = BuddyPages::new(&mut buddy, map);
 
-        let mut kmalloc = KmallocCaches::uninit();
-        kmalloc.init(&pages).unwrap();
+        let mut heap = KernelHeap::uninit();
+        heap.init(&pages).unwrap();
 
         for size in [4096usize, 5000, 16384] {
-            let object = kmalloc.kmalloc(&mut pages, size).unwrap();
-            let usable = kmalloc.ksize(&pages, object).unwrap();
+            let object = heap.alloc(&mut pages, size).unwrap();
+            let usable = heap.usable_size(&pages, object).unwrap();
             assert!(usable >= size);
             assert!(object.as_ptr() as usize > base);
             assert!((object.as_ptr() as usize) < base + MEMORY_PAGES * PAGE);
             // SAFETY: the object owns `usable` writable bytes.
             unsafe { object.as_ptr().write_bytes(0xab, usable) };
-            kmalloc.kfree(&mut pages, object).unwrap();
+            heap.free(&mut pages, object).unwrap();
         }
 
-        kmalloc.validate(&pages).unwrap();
-        kmalloc.destroy(&mut pages).unwrap();
+        heap.validate(&pages).unwrap();
+        heap.destroy(&mut pages).unwrap();
     }
 
     assert_eq!(buddy.nr_free(), MEMORY_PAGES);
 }
 
 #[test]
-fn kzalloc_and_krealloc() {
+fn heap_alloc_zeroed_and_realloc() {
     const MEMORY_PAGES: usize = 64;
     let memory = Memory::new(MEMORY_PAGES);
     let base = memory.base();
@@ -257,39 +257,39 @@ fn kzalloc_and_krealloc() {
         let map = unsafe { DirectMap::new(base, memory.ptr) };
         let mut pages = BuddyPages::new(&mut buddy, map);
 
-        let mut kmalloc = KmallocCaches::uninit();
-        kmalloc.init(&pages).unwrap();
+        let mut heap = KernelHeap::uninit();
+        heap.init(&pages).unwrap();
 
         // Zeroing covers the whole usable allocation.
-        let zeroed = kmalloc.kzalloc(&mut pages, 200).unwrap();
-        let usable = kmalloc.ksize(&pages, zeroed).unwrap();
+        let zeroed = heap.alloc_zeroed(&mut pages, 200).unwrap();
+        let usable = heap.usable_size(&pages, zeroed).unwrap();
         // SAFETY: the object is allocated and readable.
         let bytes = unsafe { core::slice::from_raw_parts(zeroed.as_ptr(), usable) };
         assert!(bytes.iter().all(|byte| *byte == 0));
-        kmalloc.kfree(&mut pages, zeroed).unwrap();
+        heap.free(&mut pages, zeroed).unwrap();
 
         // Growing copies the old bytes; shrinking keeps the pointer.
-        let object = kmalloc.kmalloc(&mut pages, 100).unwrap();
+        let object = heap.alloc(&mut pages, 100).unwrap();
         // SAFETY: the object owns at least 100 writable bytes.
         unsafe { object.as_ptr().write_bytes(0x5a, 100) };
-        let grown = kmalloc.krealloc(&mut pages, object, 3000).unwrap();
-        assert!(kmalloc.ksize(&pages, grown).unwrap() >= 3000);
-        // SAFETY: `krealloc` copied the old contents.
+        let grown = heap.realloc(&mut pages, object, 3000).unwrap();
+        assert!(heap.usable_size(&pages, grown).unwrap() >= 3000);
+        // SAFETY: `realloc` copied the old contents.
         let copied = unsafe { core::slice::from_raw_parts(grown.as_ptr(), 100) };
         assert!(copied.iter().all(|byte| *byte == 0x5a));
-        let same = kmalloc.krealloc(&mut pages, grown, 64).unwrap();
+        let same = heap.realloc(&mut pages, grown, 64).unwrap();
         assert_eq!(same, grown);
-        kmalloc.kfree(&mut pages, same).unwrap();
+        heap.free(&mut pages, same).unwrap();
 
-        kmalloc.validate(&pages).unwrap();
-        kmalloc.destroy(&mut pages).unwrap();
+        heap.validate(&pages).unwrap();
+        heap.destroy(&mut pages).unwrap();
     }
 
     assert_eq!(buddy.nr_free(), MEMORY_PAGES);
 }
 
 #[test]
-fn kfree_rejects_bad_pointers() {
+fn free_rejects_bad_pointers() {
     const MEMORY_PAGES: usize = 32;
     let memory = Memory::new(MEMORY_PAGES);
     let base = memory.base();
@@ -301,16 +301,16 @@ fn kfree_rejects_bad_pointers() {
     let map = unsafe { DirectMap::new(base, memory.ptr) };
     let mut pages = BuddyPages::new(&mut buddy, map);
 
-    let mut kmalloc = KmallocCaches::uninit();
-    kmalloc.init(&pages).unwrap();
+    let mut heap = KernelHeap::uninit();
+    heap.init(&pages).unwrap();
 
-    let object = kmalloc.kmalloc(&mut pages, 64).unwrap();
+    let object = heap.alloc(&mut pages, 64).unwrap();
 
     // An interior pointer is not on the object grid.
     // SAFETY: the arithmetic stays inside the object.
     let interior = unsafe { NonNull::new(object.as_ptr().add(8)).unwrap() };
     assert!(matches!(
-        kmalloc.kfree(&mut pages, interior),
+        heap.free(&mut pages, interior),
         Err(Error::InvalidPointer)
     ));
 
@@ -318,32 +318,32 @@ fn kfree_rejects_bad_pointers() {
     // SAFETY: the arithmetic stays inside the backing allocation.
     let stray = unsafe { NonNull::new(memory.ptr.as_ptr().add(20 * PAGE)).unwrap() };
     assert!(matches!(
-        kmalloc.kfree(&mut pages, stray),
+        heap.free(&mut pages, stray),
         Err(Error::InvalidPointer)
     ));
 
-    // An object of a cache outside the kmalloc set.
-    let mut foreign = KmemCache::uninit();
+    // An object of a cache outside the kernel heap.
+    let mut foreign = ObjectCache::uninit();
     foreign.init(&pages, "foreign", 64, 8).unwrap();
     let foreign_object = foreign.alloc(&mut pages).unwrap();
     assert!(matches!(
-        kmalloc.kfree(&mut pages, foreign_object),
+        heap.free(&mut pages, foreign_object),
         Err(Error::CrossCacheFree)
     ));
     foreign.free(&mut pages, foreign_object).unwrap();
     foreign.destroy(&mut pages).unwrap();
 
-    kmalloc.kfree(&mut pages, object).unwrap();
-    kmalloc.shrink(&mut pages).unwrap();
-    kmalloc.destroy(&mut pages).unwrap();
+    heap.free(&mut pages, object).unwrap();
+    heap.shrink(&mut pages).unwrap();
+    heap.destroy(&mut pages).unwrap();
 }
 
-/// The kmalloc set defined in a static, as a kernel would.
-static KMALLOC: Mutex<KmallocCaches> = Mutex::new(KmallocCaches::uninit());
+/// The kernel heap defined in a static, as a kernel would.
+static HEAP: Mutex<KernelHeap> = Mutex::new(KernelHeap::uninit());
 
 #[test]
-fn kmalloc_can_be_defined_in_a_static() {
-    let guard = KMALLOC.lock().unwrap();
+fn heap_can_be_defined_in_a_static() {
+    let guard = HEAP.lock().unwrap();
     assert!(!guard.is_initialized());
     assert!(guard.cache(0).is_none());
 }

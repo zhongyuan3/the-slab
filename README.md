@@ -3,7 +3,7 @@
 A `no_std` reimplementation of the Linux kernel's [SLUB] slab allocator
 (`mm/slub.c`), layered on top of [the-buddy-system].
 
-Each `KmemCache` carves page blocks requested from the page allocator into
+Each `ObjectCache` carves page blocks requested from the page allocator into
 fixed-size objects. A slab block starts with a header and is followed by
 objects on an aligned stride; free objects store the free list pointer
 inside themselves (`set_freepointer`), exactly like SLUB. The cache keeps
@@ -18,18 +18,18 @@ one active slab (`cpu_slab`) plus a doubly linked partial list
 
 - `no_std`, no global allocator: the cache is defined in place (a stack
   local, a `Box`, or a `static`) and initialized once with
-  `KmemCache::init`, following the same `uninit`/`init` pattern as the
+  `ObjectCache::init`, following the same `uninit`/`init` pattern as the
   buddy allocator.
-- Kernel-shaped layers: `KmemCache` over a `PageAlloc` abstract
+- Kernel-shaped layers: `ObjectCache` over a `PageAlloc` abstract
   (`BuddyPages` adapts the buddy allocator), over a `PhysMap`
   (`DirectMap` covers the common direct-map case).
 - SLUB algorithms and states: `calculate_order`/`calculate_sizes` layout,
   in-object free lists, active slab + partial list, `min_partial`, and
   `alloc_zeroed`.
-- A `kmalloc` facade: `KmallocCaches` creates one cache per size class
+- A kernel heap: `KernelHeap` creates one cache per size class
   (`kmalloc_info`), serves larger requests straight from the page
-  allocator (`kmalloc_large`), and provides `kmalloc`/`kzalloc`/`kfree`
-  (pointer inference)/`ksize`/`krealloc`.
+  allocator (`alloc_large`), and provides `alloc`/`alloc_zeroed`/`free`
+  (pointer inference)/`usable_size`/`realloc`.
 - `try_alloc_cached`, the allocator-free fast path a kernel runs without
   the zone lock; all other methods take `&mut self` and leave locking to
   the caller.
@@ -47,7 +47,7 @@ use core::alloc::Layout;
 use core::ptr::NonNull;
 
 use the_buddy_system::{Buddy, Page};
-use the_slab::{BuddyPages, DirectMap, KmemCache};
+use the_slab::{BuddyPages, DirectMap, ObjectCache};
 
 const PAGE: usize = 0x1000;
 const PAGES: usize = 64;
@@ -66,7 +66,7 @@ buddy.free_range(base, base + PAGES * PAGE).unwrap();
 let map = unsafe { DirectMap::new(base, memory) };
 let mut pages = BuddyPages::new(&mut buddy, map);
 
-let mut cache = KmemCache::uninit();
+let mut cache = ObjectCache::uninit();
 cache.init(&pages, "widgets", 24, 8).unwrap();
 
 let object = cache.alloc(&mut pages).unwrap();
@@ -75,31 +75,31 @@ cache.free(&mut pages, object).unwrap();
 cache.destroy(&mut pages).unwrap();
 ```
 
-## kmalloc facade
+## Kernel heap
 
-`KmallocCaches` mirrors the kernel's size-class API on top of the same
-page allocator. It is defined in place and initialized once, and `kfree`
-finds the owning cache or large block from the pointer alone:
+`KernelHeap` mirrors the kernel's size-class API (`kmalloc`) on top of
+the same page allocator. It is defined in place and initialized once, and
+`free` finds the owning cache or large block from the pointer alone:
 
 ```rust
-use the_slab::KmallocCaches;
+use the_slab::KernelHeap;
 
-let mut kmalloc = KmallocCaches::uninit();
-kmalloc.init(&pages).unwrap();
+let mut heap = KernelHeap::uninit();
+heap.init(&pages).unwrap();
 
-let object = kmalloc.kmalloc(&mut pages, 100).unwrap();
-assert!(kmalloc.ksize(&pages, object).unwrap() >= 100);
-kmalloc.kfree(&mut pages, object).unwrap();
+let object = heap.alloc(&mut pages, 100).unwrap();
+assert!(heap.usable_size(&pages, object).unwrap() >= 100);
+heap.free(&mut pages, object).unwrap();
 
 // Larger requests bypass the slabs and use the page allocator directly.
-let block = kmalloc.kzalloc(&mut pages, 5000).unwrap();
-kmalloc.kfree(&mut pages, block).unwrap();
+let block = heap.alloc_zeroed(&mut pages, 5000).unwrap();
+heap.free(&mut pages, block).unwrap();
 
-kmalloc.shrink(&mut pages).unwrap();
-kmalloc.destroy(&mut pages).unwrap();
+heap.shrink(&mut pages).unwrap();
+heap.destroy(&mut pages).unwrap();
 ```
 
-Every kmalloc slab is exactly one page, so `kfree` can page-align the
+Every kmalloc slab is exactly one page, so `free` can page-align the
 pointer to reach the slab header; requests that would need a multi-page
 slab (the kernel's two-page `kmalloc-4k`/`kmalloc-8k` on 4 KiB pages) go
 through the large path instead, where a tag at the page-aligned base of

@@ -14,7 +14,7 @@
 //!   page allocator once `min_partial` is exceeded.
 //!
 //! Deviations from the kernel: the per-CPU arrays are not implemented
-//! (locking is external, see [`KmemCache::try_alloc_cached`]), slab
+//! (locking is external, see [`ObjectCache::try_alloc_cached`]), slab
 //! metadata lives at the start of the block instead of being overlaid on
 //! `struct page`, and cache coloring, poisoning and constructors are
 //! future work.
@@ -22,12 +22,12 @@
 //! TODO(percpu): give each CPU a magazine and a frozen `cpu_slab`, and a
 //! lock-free fast path, mirroring `struct per_cpu_pages`-style batching.
 //! TODO(poison): implement `SLAB_POISON` and red zones on top of
-//! [`KmemCache::free`].
+//! [`ObjectCache::free`].
 //! TODO(ctor): support constructors and destructors in
-//! [`KmemCache::init`] and `new_slab`.
+//! [`ObjectCache::init`] and `new_slab`.
 //! TODO(kmalloc): support multi-page kmalloc classes; the class facade in
-//! `crate::kmalloc` keeps every kmalloc slab on a single page so that
-//! `kfree` can find the cache from a pointer.
+//! `crate::heap` keeps every kmalloc slab on a single page so that
+//! `free` can find the cache from a pointer.
 
 use core::mem::size_of;
 use core::ptr::NonNull;
@@ -54,7 +54,7 @@ const DEFAULT_MIN_PARTIAL: usize = 5;
 ///
 /// The cache is usable without a global allocator: it is defined in place
 /// (a stack local, a `Box`, or a `static`) and initialized once with
-/// [`KmemCache::init`], following the same `uninit`/`init` pattern as the
+/// [`ObjectCache::init`], following the same `uninit`/`init` pattern as the
 /// buddy allocator.
 ///
 /// The cache stores its own address in every slab header to reject frees
@@ -64,7 +64,7 @@ const DEFAULT_MIN_PARTIAL: usize = 5;
 /// through the stale address. Kernels define caches in statics, which
 /// satisfies the requirement by construction.
 #[derive(Debug)]
-pub struct KmemCache {
+pub struct ObjectCache {
     name: &'static str,
     layout: SlabLayout,
     /// Slab currently receiving allocations (`cpu_slab`).
@@ -78,19 +78,19 @@ pub struct KmemCache {
     nr_free_objects: usize,
 }
 
-// SAFETY: `KmemCache` holds no thread-affine state, and the slab headers it
+// SAFETY: `ObjectCache` holds no thread-affine state, and the slab headers it
 // points at are only reached through its methods. Every method's contract
 // requires the caller to serialize access (the cache core takes `&mut
 // self`), so moving the cache between threads — for example into a spin
 // lock — cannot create a data race. `Sync` is deliberately not implemented:
-// sharing `&KmemCache` must go through the caller's lock.
-unsafe impl Send for KmemCache {}
+// sharing `&ObjectCache` must go through the caller's lock.
+unsafe impl Send for ObjectCache {}
 
-impl KmemCache {
+impl ObjectCache {
     /// A `const` placeholder for static definitions.
     ///
     /// The placeholder has no layout; operations that need one report
-    /// [`Error::Uninitialized`] until [`KmemCache::init`] runs.
+    /// [`Error::Uninitialized`] until [`ObjectCache::init`] runs.
     pub const fn uninit() -> Self {
         Self {
             name: "",
@@ -105,7 +105,7 @@ impl KmemCache {
         }
     }
 
-    /// Returns `true` once [`KmemCache::init`] has computed a layout.
+    /// Returns `true` once [`ObjectCache::init`] has computed a layout.
     pub const fn is_initialized(&self) -> bool {
         self.layout.slab_bytes() != 0
     }
@@ -138,16 +138,16 @@ impl KmemCache {
         self.init_with_min_objects(pages, name, size, align, MIN_OBJECTS)
     }
 
-    /// Like [`KmemCache::init`], but with an explicit `min_objects` target
+    /// Like [`ObjectCache::init`], but with an explicit `min_objects` target
     /// (SLUB's `slub_min_objects`) instead of the default of four.
     ///
-    /// [`KmallocCaches`](crate::kmalloc::KmallocCaches) passes `1` so that
-    /// every kmalloc slab stays on a single page, which its `kfree` relies
+    /// [`KernelHeap`](crate::heap::KernelHeap) passes `1` so that
+    /// every kmalloc slab stays on a single page, which its `free` relies
     /// on to find the owning cache from an object pointer.
     ///
     /// # Errors
     ///
-    /// Same as [`KmemCache::init`]. `min_objects` must be at least one.
+    /// Same as [`ObjectCache::init`]. `min_objects` must be at least one.
     pub fn init_with_min_objects<PA: PageAlloc>(
         &mut self,
         pages: &PA,
@@ -206,7 +206,7 @@ impl KmemCache {
     /// Returns the total number of objects managed by the cache.
     ///
     /// This counter covers full slabs too, which cannot be walked, so it is
-    /// not cross-checked by [`KmemCache::validate`].
+    /// not cross-checked by [`ObjectCache::validate`].
     pub const fn nr_objects(&self) -> usize {
         self.nr_objects
     }
@@ -229,7 +229,7 @@ impl KmemCache {
     ///
     /// # Errors
     ///
-    /// [`Error::Uninitialized`] before [`KmemCache::init`], or the page
+    /// [`Error::Uninitialized`] before [`ObjectCache::init`], or the page
     /// allocator's error when no slab can be grown.
     pub fn alloc<PA: PageAlloc>(&mut self, pages: &mut PA) -> Result<NonNull<u8>, Error> {
         if !self.is_initialized() {
@@ -276,7 +276,7 @@ impl KmemCache {
         }
     }
 
-    /// Frees an object previously returned by [`KmemCache::alloc`].
+    /// Frees an object previously returned by [`ObjectCache::alloc`].
     ///
     /// Mirrors `slab_free`: the object goes back to its slab's free list
     /// and the slab moves between the full, partial and empty states. An
@@ -284,7 +284,7 @@ impl KmemCache {
     ///
     /// # Errors
     ///
-    /// [`Error::Uninitialized`] before [`KmemCache::init`];
+    /// [`Error::Uninitialized`] before [`ObjectCache::init`];
     /// [`Error::InvalidPointer`] if the pointer is not an object of this
     /// cache (misaligned, outside the object area, or not a slab);
     /// [`Error::CrossCacheFree`] if the slab belongs to another cache;
@@ -295,7 +295,7 @@ impl KmemCache {
             return Err(Error::Uninitialized);
         }
 
-        let owner = (self as *const KmemCache).cast::<()>();
+        let owner = (self as *const ObjectCache).cast::<()>();
         let phys = pages.virt_to_phys(ptr);
         let slab_bytes = PA::Addr::from_usize(self.layout.slab_bytes());
         let base = PA::Addr::align_down(phys, slab_bytes);
@@ -492,7 +492,7 @@ impl KmemCache {
         // SAFETY: the caller guarantees `slab` is owned by this cache.
         unsafe {
             let header = &*slab.as_ptr();
-            let owner = (self as *const KmemCache).cast::<()>();
+            let owner = (self as *const ObjectCache).cast::<()>();
             if header.magic != SLAB_MAGIC || header.owner != owner {
                 return Err(Error::CorruptSlab);
             }
@@ -593,7 +593,7 @@ impl KmemCache {
         // slab_bytes`).
         unsafe {
             let header = &mut *slab.as_ptr();
-            header.owner = (self as *const KmemCache).cast::<()>();
+            header.owner = (self as *const ObjectCache).cast::<()>();
             header.magic = SLAB_MAGIC;
             header.order = self.layout.order();
             header.on_partial = false;
@@ -862,14 +862,14 @@ mod tests {
         }
     }
 
-    fn cache_with(alloc: &TestAlloc, size: usize, align: usize) -> KmemCache {
-        let mut cache = KmemCache::uninit();
+    fn cache_with(alloc: &TestAlloc, size: usize, align: usize) -> ObjectCache {
+        let mut cache = ObjectCache::uninit();
         cache.init(alloc, "test", size, align).unwrap();
         cache
     }
 
     fn alloc_many(
-        cache: &mut KmemCache,
+        cache: &mut ObjectCache,
         alloc: &mut TestAlloc,
         count: usize,
     ) -> Vec<NonNull<u8>> {
@@ -879,7 +879,7 @@ mod tests {
     #[test]
     fn uninit_is_inert() {
         let mut alloc = TestAlloc::new();
-        let mut cache = KmemCache::uninit();
+        let mut cache = ObjectCache::uninit();
         assert!(!cache.is_initialized());
         assert_eq!(cache.nr_slabs(), 0);
 
@@ -899,7 +899,7 @@ mod tests {
     #[test]
     fn init_validates_parameters_and_runs_once() {
         let alloc = TestAlloc::new();
-        let mut cache = KmemCache::uninit();
+        let mut cache = ObjectCache::uninit();
 
         assert!(matches!(
             cache.init(&alloc, "tiny", 4, 8),
