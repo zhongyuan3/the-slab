@@ -106,6 +106,25 @@ slab (the kernel's two-page `kmalloc-4k`/`kmalloc-8k` on 4 KiB pages) go
 through the large path instead, where a tag at the page-aligned base of
 the block records the allocation order.
 
+Allocations carry the kernel's natural alignment: a power-of-two class
+returns that alignment and the intermediates at least their lowbit (96 →
+32, 192 → 64). For an explicit alignment use `alloc_layout(Layout)`,
+which picks the smallest class covering both size and alignment:
+
+```rust
+use core::alloc::Layout;
+
+let layout = Layout::from_size_align(100, 32).unwrap();
+let object = heap.alloc_layout(&mut pages, layout).unwrap();
+assert_eq!(object.as_ptr() as usize % 32, 0);
+```
+
+Requests that no class can serve use the large path when the alignment is
+at most 8 and are rejected with `Error::InvalidAlign` otherwise; an
+`ObjectCache` created with the wanted alignment (the counterpart of
+`kmem_cache_create(align = ...)`), or the page allocator, serves
+over-aligned blocks.
+
 ## Page allocator statics
 
 Caches and the kernel heap are typically statics, while `BuddyPages`

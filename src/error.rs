@@ -21,8 +21,8 @@ pub enum Error {
     AlreadyInitialized,
     /// The object size is zero or smaller than a free list pointer.
     InvalidObjectSize,
-    /// The alignment is zero, not a power of two, or larger than the page
-    /// size.
+    /// The alignment is zero, not a power of two, larger than the page
+    /// size, or not satisfiable by any available slab class.
     InvalidAlign,
     /// The page size is zero or not a power of two.
     InvalidPageSize,

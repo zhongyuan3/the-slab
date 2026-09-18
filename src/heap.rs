@@ -19,6 +19,7 @@
 //! [`ObjectCache`] API (the kernel's two-page classes, `kmalloc-4k` and
 //! `kmalloc-8k` on 4 KiB pages, are served by the large path here).
 
+use core::alloc::Layout;
 use core::mem::size_of;
 use core::ptr::NonNull;
 
@@ -37,9 +38,25 @@ use crate::pages::PhysMap;
 ///
 /// Sizes above the largest class, and classes whose slab would need more
 /// than one page, are served by the large path.
+///
+/// The alignment a class provides is its natural alignment, the largest
+/// power of two dividing the class size (at least pointer alignment):
+/// power-of-two classes are aligned to their size and the intermediates to
+/// their lowbit (96 to 32, 192 to 64), like SLUB's object placement.
 pub const SIZE_CLASSES: [usize; 13] = [
     8, 16, 32, 64, 96, 128, 192, 256, 512, 1024, 2048, 4096, 8192,
 ];
+
+/// Natural alignment of a size class.
+///
+/// SLUB lays objects out at multiples of their size from a page-aligned
+/// base, so an object of `size` bytes ends up aligned to the largest power
+/// of two dividing `size` (at least pointer alignment). The in-slab header
+/// breaks the "multiples from zero" property, so the alignment is applied
+/// explicitly when the cache is created.
+fn natural_alignment(size: usize) -> usize {
+    (size & size.wrapping_neg()).max(core::mem::size_of::<*mut u8>())
+}
 
 const CLASS_COUNT: usize = SIZE_CLASSES.len();
 
@@ -140,7 +157,8 @@ impl KernelHeap {
             // `min_objects = 1` keeps every kmalloc slab on a single page,
             // which `free` relies on to find the cache by page-aligning
             // the object pointer.
-            match cache.init_with_min_objects(pages, CLASS_NAMES[index], size, 8, 1) {
+            let align = natural_alignment(size).min(page_size);
+            match cache.init_with_min_objects(pages, CLASS_NAMES[index], size, align, 1) {
                 Ok(()) if cache.layout().order() == 0 => {
                     self.caches[index] = cache;
                     self.active[index] = true;
@@ -160,6 +178,19 @@ impl KernelHeap {
     /// `None` when the request is larger than every class.
     pub fn class_index(size: usize) -> Option<usize> {
         SIZE_CLASSES.iter().position(|&class| class >= size)
+    }
+
+    /// Returns the index of the smallest active class whose size covers
+    /// `layout.size()` and whose natural alignment covers
+    /// `layout.align()`.
+    fn class_index_for_layout(&self, layout: Layout) -> Option<usize> {
+        let size = layout.size();
+        let align = layout.align();
+        (0..CLASS_COUNT).find(|&index| {
+            self.active[index]
+                && SIZE_CLASSES[index] >= size
+                && natural_alignment(SIZE_CLASSES[index]) >= align
+        })
     }
 
     /// Returns the cache of a class, if the class has one.
@@ -216,6 +247,102 @@ impl KernelHeap {
         // SAFETY: the allocation owns `usable` writable bytes.
         unsafe { object.as_ptr().write_bytes(0, usable) };
         Ok(object)
+    }
+
+    /// Allocates memory satisfying `layout` (`layout.size()` must be
+    /// non-zero).
+    ///
+    /// The block comes from the smallest class whose object size covers
+    /// `layout.size()` and whose natural alignment covers
+    /// `layout.align()`, so the returned pointer is aligned to at least
+    /// `layout.align()`. Requests that no slab class can satisfy fall back
+    /// to the large path when `layout.align() <= 8`; otherwise they are
+    /// rejected with [`Error::InvalidAlign`], because the large tag puts
+    /// the user pointer on an 8-byte boundary. Use an [`ObjectCache`]
+    /// created with the wanted alignment (the counterpart of
+    /// `kmem_cache_create(align = ...)`), or a page allocator, for
+    /// over-aligned blocks.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Uninitialized`] before [`KernelHeap::init`],
+    /// [`Error::InvalidObjectSize`] for a zero size,
+    /// [`Error::InvalidAlign`] when neither a slab class nor the large
+    /// path can provide the alignment, or the chosen path's allocation
+    /// errors.
+    pub fn alloc_layout<PA: PageAlloc>(
+        &mut self,
+        pages: &mut PA,
+        layout: Layout,
+    ) -> Result<NonNull<u8>, Error> {
+        if !self.initialized {
+            return Err(Error::Uninitialized);
+        }
+        if layout.size() == 0 {
+            return Err(Error::InvalidObjectSize);
+        }
+
+        if let Some(index) = self.class_index_for_layout(layout) {
+            return self.caches[index].alloc(pages);
+        }
+        if layout.align() <= LARGE_TAG_SIZE {
+            return self.alloc_large(pages, layout.size());
+        }
+        Err(Error::InvalidAlign)
+    }
+
+    /// Like [`KernelHeap::alloc_layout`], with the usable bytes zeroed.
+    pub fn alloc_zeroed_layout<PA: PageAlloc>(
+        &mut self,
+        pages: &mut PA,
+        layout: Layout,
+    ) -> Result<NonNull<u8>, Error> {
+        let object = self.alloc_layout(pages, layout)?;
+        let usable = self.usable_size(pages, object)?;
+        // SAFETY: the allocation owns `usable` writable bytes.
+        unsafe { object.as_ptr().write_bytes(0, usable) };
+        Ok(object)
+    }
+
+    /// Resizes an allocation so that it satisfies `new_layout`.
+    ///
+    /// Like [`KernelHeap::realloc`], but the block is also moved when the
+    /// current pointer does not satisfy `new_layout.align()`.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`KernelHeap::alloc_layout`] and
+    /// [`KernelHeap::usable_size`].
+    pub fn realloc_layout<PA: PageAlloc>(
+        &mut self,
+        pages: &mut PA,
+        ptr: NonNull<u8>,
+        new_layout: Layout,
+    ) -> Result<NonNull<u8>, Error> {
+        if !self.initialized {
+            return Err(Error::Uninitialized);
+        }
+        if new_layout.size() == 0 {
+            return Err(Error::InvalidObjectSize);
+        }
+
+        let old_size = self.usable_size(pages, ptr)?;
+        if new_layout.size() <= old_size && ptr.as_ptr().addr() % new_layout.align() == 0 {
+            return Ok(ptr);
+        }
+
+        let new = self.alloc_layout(pages, new_layout)?;
+        // SAFETY: both allocations are valid for their sizes and `new` was
+        // just handed out, so it cannot overlap the still-live `ptr`.
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                ptr.as_ptr(),
+                new.as_ptr(),
+                old_size.min(new_layout.size()),
+            );
+        }
+        self.free(pages, ptr)?;
+        Ok(new)
     }
 
     /// Returns an allocation from [`KernelHeap::alloc`] to its slab
@@ -454,6 +581,28 @@ mod tests {
         assert_eq!(KernelHeap::class_index(97), Some(5));
         assert_eq!(KernelHeap::class_index(8192), Some(12));
         assert_eq!(KernelHeap::class_index(8193), None);
+    }
+
+    #[test]
+    fn natural_alignment_is_the_lowbit_of_the_class() {
+        let expected = [
+            (8usize, 8usize),
+            (16, 16),
+            (32, 32),
+            (64, 64),
+            (96, 32),
+            (128, 128),
+            (192, 64),
+            (256, 256),
+            (512, 512),
+            (1024, 1024),
+            (2048, 2048),
+            (4096, 4096),
+            (8192, 8192),
+        ];
+        for (size, align) in expected {
+            assert_eq!(natural_alignment(size), align, "class {size}");
+        }
     }
 
     #[test]

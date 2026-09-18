@@ -290,6 +290,170 @@ fn heap_alloc_zeroed_and_realloc() {
 }
 
 #[test]
+fn heap_allocations_are_naturally_aligned() {
+    const MEMORY_PAGES: usize = 64;
+    let memory = Memory::new(MEMORY_PAGES);
+    let base = memory.base();
+    let mut descriptors = vec![Page::EMPTY; MEMORY_PAGES];
+    let mut buddy = Buddy::<usize, MAX_ORDER>::new(base, PAGE, &mut descriptors).unwrap();
+    buddy.free_range(base, base + MEMORY_PAGES * PAGE).unwrap();
+
+    {
+        // SAFETY: the identity mapping covers the backing allocation.
+        let map = unsafe { DirectMap::new(base, memory.ptr) };
+        let mut pages = BuddyPages::new(&mut buddy, map);
+
+        let mut heap = KernelHeap::uninit();
+        heap.init(&pages).unwrap();
+
+        // Power-of-two classes return their own alignment; the 96 and 192
+        // intermediates at least their lowbit.
+        for (size, align) in [
+            (8usize, 8usize),
+            (16, 16),
+            (64, 64),
+            (96, 32),
+            (192, 64),
+            (256, 256),
+            (2048, 2048),
+        ] {
+            let object = heap.alloc(&mut pages, size).unwrap();
+            assert_eq!(object.as_ptr().addr() % align, 0, "size {size}");
+            heap.free(&mut pages, object).unwrap();
+        }
+
+        // A request that rounds up to a larger class gets its alignment.
+        let object = heap.alloc(&mut pages, 100).unwrap(); // class 128
+        assert_eq!(object.as_ptr().addr() % 128, 0);
+        heap.free(&mut pages, object).unwrap();
+
+        heap.shrink(&mut pages).unwrap();
+        heap.destroy(&mut pages).unwrap();
+    }
+
+    assert_eq!(buddy.nr_free(), MEMORY_PAGES);
+}
+
+#[test]
+fn alloc_layout_honors_size_and_alignment() {
+    const MEMORY_PAGES: usize = 128;
+    let memory = Memory::new(MEMORY_PAGES);
+    let base = memory.base();
+    let mut descriptors = vec![Page::EMPTY; MEMORY_PAGES];
+    let mut buddy = Buddy::<usize, MAX_ORDER>::new(base, PAGE, &mut descriptors).unwrap();
+    buddy.free_range(base, base + MEMORY_PAGES * PAGE).unwrap();
+
+    {
+        // SAFETY: the identity mapping covers the backing allocation.
+        let map = unsafe { DirectMap::new(base, memory.ptr) };
+        let mut pages = BuddyPages::new(&mut buddy, map);
+
+        let mut heap = KernelHeap::uninit();
+        heap.init(&pages).unwrap();
+
+        // (size, align, expected class): the smallest class covering both.
+        for (size, align, class) in [
+            (1usize, 8usize, 8usize),
+            (64, 64, 64),
+            (100, 32, 128),
+            (4, 64, 64),
+            (200, 128, 256),
+        ] {
+            let layout = Layout::from_size_align(size, align).unwrap();
+            let object = heap.alloc_layout(&mut pages, layout).unwrap();
+            assert_eq!(object.as_ptr().addr() % align, 0, "{size}/{align}");
+            assert_eq!(
+                heap.usable_size(&pages, object).unwrap(),
+                class,
+                "{size}/{align}"
+            );
+            heap.free(&mut pages, object).unwrap();
+        }
+
+        // Requests larger than every class use the large path when the
+        // alignment fits the tag's 8-byte boundary.
+        let layout = Layout::from_size_align(10_000, 8).unwrap();
+        let object = heap.alloc_layout(&mut pages, layout).unwrap();
+        assert!(heap.usable_size(&pages, object).unwrap() >= 10_000);
+        heap.free(&mut pages, object).unwrap();
+
+        // Over-aligned requests that no class can serve are rejected:
+        // class 4096 would need a multi-page slab on 4 KiB pages.
+        let layout = Layout::from_size_align(64, 4096).unwrap();
+        assert!(matches!(
+            heap.alloc_layout(&mut pages, layout),
+            Err(Error::InvalidAlign)
+        ));
+
+        // Zero-sized layouts are rejected like `alloc(0)`.
+        let layout = Layout::from_size_align(0, 8).unwrap();
+        assert!(matches!(
+            heap.alloc_layout(&mut pages, layout),
+            Err(Error::InvalidObjectSize)
+        ));
+
+        heap.validate(&pages).unwrap();
+        heap.destroy(&mut pages).unwrap();
+    }
+
+    assert_eq!(buddy.nr_free(), MEMORY_PAGES);
+}
+
+#[test]
+fn alloc_zeroed_layout_and_realloc_layout() {
+    const MEMORY_PAGES: usize = 64;
+    let memory = Memory::new(MEMORY_PAGES);
+    let base = memory.base();
+    let mut descriptors = vec![Page::EMPTY; MEMORY_PAGES];
+    let mut buddy = Buddy::<usize, MAX_ORDER>::new(base, PAGE, &mut descriptors).unwrap();
+    buddy.free_range(base, base + MEMORY_PAGES * PAGE).unwrap();
+
+    {
+        // SAFETY: the identity mapping covers the backing allocation.
+        let map = unsafe { DirectMap::new(base, memory.ptr) };
+        let mut pages = BuddyPages::new(&mut buddy, map);
+
+        let mut heap = KernelHeap::uninit();
+        heap.init(&pages).unwrap();
+
+        // Zeroing covers the usable allocation.
+        let layout = Layout::from_size_align(100, 32).unwrap();
+        let object = heap.alloc_zeroed_layout(&mut pages, layout).unwrap();
+        let usable = heap.usable_size(&pages, object).unwrap();
+        // SAFETY: the object is allocated and readable.
+        let bytes = unsafe { core::slice::from_raw_parts(object.as_ptr(), usable) };
+        assert!(bytes.iter().all(|byte| *byte == 0));
+        heap.free(&mut pages, object).unwrap();
+
+        // A stronger alignment is honored, keeping the old contents.
+        let small = heap
+            .alloc_layout(&mut pages, Layout::from_size_align(4, 8).unwrap())
+            .unwrap();
+        // SAFETY: the object owns at least 4 writable bytes.
+        unsafe { small.as_ptr().write_bytes(0x5a, 4) };
+        let moved = heap
+            .realloc_layout(&mut pages, small, Layout::from_size_align(4, 64).unwrap())
+            .unwrap();
+        assert_eq!(moved.as_ptr().addr() % 64, 0);
+        // SAFETY: `realloc_layout` copied the old contents.
+        let copied = unsafe { core::slice::from_raw_parts(moved.as_ptr(), 4) };
+        assert!(copied.iter().all(|byte| *byte == 0x5a));
+
+        // A satisfied alignment keeps the pointer.
+        let same = heap
+            .realloc_layout(&mut pages, moved, Layout::from_size_align(2, 64).unwrap())
+            .unwrap();
+        assert_eq!(same, moved);
+        heap.free(&mut pages, same).unwrap();
+
+        heap.validate(&pages).unwrap();
+        heap.destroy(&mut pages).unwrap();
+    }
+
+    assert_eq!(buddy.nr_free(), MEMORY_PAGES);
+}
+
+#[test]
 fn free_rejects_bad_pointers() {
     const MEMORY_PAGES: usize = 32;
     let memory = Memory::new(MEMORY_PAGES);

@@ -22,7 +22,13 @@ All notable changes to this project are documented in this file.
   `usable_size`/`realloc`, and the large path straight through the page
   allocator with an order tag at the base of the block. Every kmalloc
   slab is one page, so `free` finds the cache by page-aligning the
-  pointer.
+  pointer. Each class carries its natural alignment (power-of-two classes
+  to their size, 96 to 32, 192 to 64), matching SLUB's object placement.
+- `KernelHeap::alloc_layout`/`alloc_zeroed_layout`/`realloc_layout` take
+  a `Layout` and pick the smallest class covering both the size and the
+  alignment; over-aligned requests that no class can serve report
+  `Error::InvalidAlign` (use an `ObjectCache` with the wanted alignment,
+  or the page allocator).
 - In-object free lists (`set_freepointer`), the active slab plus doubly
   linked partial list, and `min_partial` empty-slab policy.
 - `PageAlloc`/`PhysMap` abstractions with a `DirectMap` linear mapping and
