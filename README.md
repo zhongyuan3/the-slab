@@ -172,19 +172,6 @@ cargo +nightly miri test --lib --tests
 MIRIFLAGS="-Zmiri-tree-borrows -Zmiri-strict-provenance" cargo +nightly miri test --lib --tests
 ```
 
-## Roadmap
-
-Not implemented yet; the extension points are marked with `TODO(name)`
-comments in the source:
-
-- per-CPU magazines and the lock-free `cpu_slab` fast path —
-  `TODO(percpu)`
-- slab coloring — `TODO(color)`
-- `SLAB_POISON`/red zones and full object checking — `TODO(poison)`
-- constructors and destructors — `TODO(ctor)`
-- multi-page kmalloc classes; the kernel's two-page `kmalloc-4k` and
-  `kmalloc-8k` are served by the large path — `TODO(kmalloc)`
-
 ## License
 
 MIT. See [LICENSE](LICENSE).
