@@ -17,8 +17,11 @@ use the_slab::Zone;
 
 const PAGE: usize = 0x1000;
 const PAGES: usize = 64;
-const MAX_ORDER: usize = 4; // largest block: 8 pages
-const BLOCK_BYTES: usize = PAGE << (MAX_ORDER - 1);
+// `NR_PAGE_ORDERS` free areas: valid orders are 0..=3 (`Buddy::MAX_ORDER`
+// is 3) and the largest block is 8 pages.
+const NR_PAGE_ORDERS: usize = 4;
+// Largest block, i.e. 1 << Buddy::MAX_ORDER pages.
+const BLOCK_BYTES: usize = PAGE << (NR_PAGE_ORDERS - 1);
 
 /// A block of real memory, block-aligned and zeroed, standing in for
 /// physical memory.
@@ -55,7 +58,7 @@ fn slab_over_buddy_end_to_end() {
     let base = memory.base();
 
     let mut descriptors = vec![Page::EMPTY; PAGES];
-    let mut buddy = Buddy::<usize, MAX_ORDER>::new(base, PAGE, &mut descriptors).unwrap();
+    let mut buddy = Buddy::<usize, NR_PAGE_ORDERS>::new(base, PAGE, &mut descriptors).unwrap();
     buddy.free_range(base, base + PAGES * PAGE).unwrap();
     assert_eq!(buddy.nr_free(), PAGES);
 
@@ -111,7 +114,7 @@ fn boot_handoff_from_memblock_to_slab() {
     mb.reserve_kern(base, 2 * PAGE).unwrap();
 
     let mut descriptors = vec![Page::EMPTY; PAGES];
-    let mut buddy = Buddy::<usize, MAX_ORDER>::new(base, PAGE, &mut descriptors).unwrap();
+    let mut buddy = Buddy::<usize, NR_PAGE_ORDERS>::new(base, PAGE, &mut descriptors).unwrap();
     buddy.free_memblock(&mb).unwrap();
 
     {
@@ -161,7 +164,7 @@ fn heap_across_classes_roundtrip() {
     let memory = Memory::new(MEMORY_PAGES);
     let base = memory.base();
     let mut descriptors = vec![Page::EMPTY; MEMORY_PAGES];
-    let mut buddy = Buddy::<usize, MAX_ORDER>::new(base, PAGE, &mut descriptors).unwrap();
+    let mut buddy = Buddy::<usize, NR_PAGE_ORDERS>::new(base, PAGE, &mut descriptors).unwrap();
     buddy.free_range(base, base + MEMORY_PAGES * PAGE).unwrap();
 
     {
@@ -215,7 +218,7 @@ fn heap_large_uses_the_page_allocator() {
     let memory = Memory::new(MEMORY_PAGES);
     let base = memory.base();
     let mut descriptors = vec![Page::EMPTY; MEMORY_PAGES];
-    let mut buddy = Buddy::<usize, MAX_ORDER>::new(base, PAGE, &mut descriptors).unwrap();
+    let mut buddy = Buddy::<usize, NR_PAGE_ORDERS>::new(base, PAGE, &mut descriptors).unwrap();
     buddy.free_range(base, base + MEMORY_PAGES * PAGE).unwrap();
 
     {
@@ -250,7 +253,7 @@ fn heap_alloc_zeroed_and_realloc() {
     let memory = Memory::new(MEMORY_PAGES);
     let base = memory.base();
     let mut descriptors = vec![Page::EMPTY; MEMORY_PAGES];
-    let mut buddy = Buddy::<usize, MAX_ORDER>::new(base, PAGE, &mut descriptors).unwrap();
+    let mut buddy = Buddy::<usize, NR_PAGE_ORDERS>::new(base, PAGE, &mut descriptors).unwrap();
     buddy.free_range(base, base + MEMORY_PAGES * PAGE).unwrap();
 
     {
@@ -295,7 +298,7 @@ fn heap_allocations_are_naturally_aligned() {
     let memory = Memory::new(MEMORY_PAGES);
     let base = memory.base();
     let mut descriptors = vec![Page::EMPTY; MEMORY_PAGES];
-    let mut buddy = Buddy::<usize, MAX_ORDER>::new(base, PAGE, &mut descriptors).unwrap();
+    let mut buddy = Buddy::<usize, NR_PAGE_ORDERS>::new(base, PAGE, &mut descriptors).unwrap();
     buddy.free_range(base, base + MEMORY_PAGES * PAGE).unwrap();
 
     {
@@ -340,7 +343,7 @@ fn alloc_layout_honors_size_and_alignment() {
     let memory = Memory::new(MEMORY_PAGES);
     let base = memory.base();
     let mut descriptors = vec![Page::EMPTY; MEMORY_PAGES];
-    let mut buddy = Buddy::<usize, MAX_ORDER>::new(base, PAGE, &mut descriptors).unwrap();
+    let mut buddy = Buddy::<usize, NR_PAGE_ORDERS>::new(base, PAGE, &mut descriptors).unwrap();
     buddy.free_range(base, base + MEMORY_PAGES * PAGE).unwrap();
 
     {
@@ -405,7 +408,7 @@ fn alloc_zeroed_layout_and_realloc_layout() {
     let memory = Memory::new(MEMORY_PAGES);
     let base = memory.base();
     let mut descriptors = vec![Page::EMPTY; MEMORY_PAGES];
-    let mut buddy = Buddy::<usize, MAX_ORDER>::new(base, PAGE, &mut descriptors).unwrap();
+    let mut buddy = Buddy::<usize, NR_PAGE_ORDERS>::new(base, PAGE, &mut descriptors).unwrap();
     buddy.free_range(base, base + MEMORY_PAGES * PAGE).unwrap();
 
     {
@@ -459,7 +462,7 @@ fn free_rejects_bad_pointers() {
     let memory = Memory::new(MEMORY_PAGES);
     let base = memory.base();
     let mut descriptors = vec![Page::EMPTY; MEMORY_PAGES];
-    let mut buddy = Buddy::<usize, MAX_ORDER>::new(base, PAGE, &mut descriptors).unwrap();
+    let mut buddy = Buddy::<usize, NR_PAGE_ORDERS>::new(base, PAGE, &mut descriptors).unwrap();
     buddy.free_range(base, base + MEMORY_PAGES * PAGE).unwrap();
 
     // SAFETY: the identity mapping covers the backing allocation.
@@ -517,7 +520,7 @@ fn heap_can_be_defined_in_a_static() {
 fn static_zone_object_cache_and_heap_share_the_page_allocator() {
     // Everything a kernel keeps for the whole system lives in statics: the
     // zone (page allocator), an object cache and the kernel heap.
-    static ZONE: Mutex<Zone<usize, MAX_ORDER>> = Mutex::new(Zone::uninit());
+    static ZONE: Mutex<Zone<usize, NR_PAGE_ORDERS>> = Mutex::new(Zone::uninit());
     static CACHE: Mutex<ObjectCache> = Mutex::new(ObjectCache::uninit());
     static STATIC_HEAP: Mutex<KernelHeap> = Mutex::new(KernelHeap::uninit());
 

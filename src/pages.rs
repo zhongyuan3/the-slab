@@ -158,16 +158,16 @@ impl<A: PageFrame> PhysMap for DirectMap<A> {
 /// Mirrors a kernel zone: `Buddy::alloc_pages` plays the role of
 /// `alloc_pages_node`, and the mapping stands in for the direct map. Use
 /// [`Zone`] instead when the page allocator must live in a `static`.
-pub struct BuddyPages<'a, 'b, A: PageFrame, const MAX_ORDER: usize, M: PhysMap<Addr = A>> {
-    buddy: &'a mut Buddy<'b, A, MAX_ORDER>,
+pub struct BuddyPages<'a, 'b, A: PageFrame, const NR_PAGE_ORDERS: usize, M: PhysMap<Addr = A>> {
+    buddy: &'a mut Buddy<'b, A, NR_PAGE_ORDERS>,
     map: M,
 }
 
-impl<'a, 'b, A: PageFrame, const MAX_ORDER: usize, M: PhysMap<Addr = A>>
-    BuddyPages<'a, 'b, A, MAX_ORDER, M>
+impl<'a, 'b, A: PageFrame, const NR_PAGE_ORDERS: usize, M: PhysMap<Addr = A>>
+    BuddyPages<'a, 'b, A, NR_PAGE_ORDERS, M>
 {
     /// Creates a page allocator over `buddy` and `map`.
-    pub fn new(buddy: &'a mut Buddy<'b, A, MAX_ORDER>, map: M) -> Self {
+    pub fn new(buddy: &'a mut Buddy<'b, A, NR_PAGE_ORDERS>, map: M) -> Self {
         Self { buddy, map }
     }
 
@@ -177,8 +177,8 @@ impl<'a, 'b, A: PageFrame, const MAX_ORDER: usize, M: PhysMap<Addr = A>>
     }
 }
 
-impl<A: PageFrame, const MAX_ORDER: usize, M: PhysMap<Addr = A>> PhysMap
-    for BuddyPages<'_, '_, A, MAX_ORDER, M>
+impl<A: PageFrame, const NR_PAGE_ORDERS: usize, M: PhysMap<Addr = A>> PhysMap
+    for BuddyPages<'_, '_, A, NR_PAGE_ORDERS, M>
 {
     type Addr = A;
 
@@ -191,15 +191,17 @@ impl<A: PageFrame, const MAX_ORDER: usize, M: PhysMap<Addr = A>> PhysMap
     }
 }
 
-impl<A: PageFrame, const MAX_ORDER: usize, M: PhysMap<Addr = A>> PageAlloc
-    for BuddyPages<'_, '_, A, MAX_ORDER, M>
+impl<A: PageFrame, const NR_PAGE_ORDERS: usize, M: PhysMap<Addr = A>> PageAlloc
+    for BuddyPages<'_, '_, A, NR_PAGE_ORDERS, M>
 {
     fn page_size(&self) -> usize {
         self.buddy.page_size().try_to_usize().unwrap_or(0)
     }
 
     fn max_order(&self) -> u8 {
-        (MAX_ORDER - 1) as u8
+        // `NR_PAGE_ORDERS - 1` via the buddy's canonical constant
+        // (mirrors the kernel's `MAX_PAGE_ORDER`).
+        <Buddy<'_, A, NR_PAGE_ORDERS>>::MAX_ORDER as u8
     }
 
     fn alloc_pages(&mut self, order: u8) -> Result<A, Error> {
@@ -241,8 +243,8 @@ impl<A: PageFrame, const MAX_ORDER: usize, M: PhysMap<Addr = A>> PageAlloc
 /// When the zone and a cache are both behind locks, acquire the cache lock
 /// first and then the zone lock, mirroring SLUB's slab-then-zone order,
 /// and keep that order at every call site.
-pub struct Zone<A: PageFrame, const MAX_ORDER: usize> {
-    buddy: Buddy<'static, A, MAX_ORDER>,
+pub struct Zone<A: PageFrame, const NR_PAGE_ORDERS: usize> {
+    buddy: Buddy<'static, A, NR_PAGE_ORDERS>,
     map: DirectMap<A>,
 }
 
@@ -250,9 +252,9 @@ pub struct Zone<A: PageFrame, const MAX_ORDER: usize> {
 // outside its methods. Every method's contract requires externally
 // synchronized access (see `Buddy::from_raw_parts`), so moving the zone
 // between threads — for example into a lock — cannot create a data race.
-unsafe impl<A: PageFrame + Send, const MAX_ORDER: usize> Send for Zone<A, MAX_ORDER> {}
+unsafe impl<A: PageFrame + Send, const NR_PAGE_ORDERS: usize> Send for Zone<A, NR_PAGE_ORDERS> {}
 
-impl<A: PageFrame, const MAX_ORDER: usize> Zone<A, MAX_ORDER> {
+impl<A: PageFrame, const NR_PAGE_ORDERS: usize> Zone<A, NR_PAGE_ORDERS> {
     /// A `const` placeholder for static definitions.
     pub const fn uninit() -> Self {
         Self {
@@ -325,13 +327,13 @@ impl<A: PageFrame, const MAX_ORDER: usize> Zone<A, MAX_ORDER> {
     }
 
     /// Returns the underlying buddy allocator.
-    pub fn buddy(&self) -> &Buddy<'static, A, MAX_ORDER> {
+    pub fn buddy(&self) -> &Buddy<'static, A, NR_PAGE_ORDERS> {
         &self.buddy
     }
 
     /// Returns the underlying buddy allocator, for example to feed it the
     /// memory left over by the boot allocator.
-    pub fn buddy_mut(&mut self) -> &mut Buddy<'static, A, MAX_ORDER> {
+    pub fn buddy_mut(&mut self) -> &mut Buddy<'static, A, NR_PAGE_ORDERS> {
         &mut self.buddy
     }
 
@@ -341,7 +343,7 @@ impl<A: PageFrame, const MAX_ORDER: usize> Zone<A, MAX_ORDER> {
     }
 }
 
-impl<A: PageFrame, const MAX_ORDER: usize> PhysMap for Zone<A, MAX_ORDER> {
+impl<A: PageFrame, const NR_PAGE_ORDERS: usize> PhysMap for Zone<A, NR_PAGE_ORDERS> {
     type Addr = A;
 
     fn phys_to_virt(&self, addr: A) -> NonNull<u8> {
@@ -353,13 +355,15 @@ impl<A: PageFrame, const MAX_ORDER: usize> PhysMap for Zone<A, MAX_ORDER> {
     }
 }
 
-impl<A: PageFrame, const MAX_ORDER: usize> PageAlloc for Zone<A, MAX_ORDER> {
+impl<A: PageFrame, const NR_PAGE_ORDERS: usize> PageAlloc for Zone<A, NR_PAGE_ORDERS> {
     fn page_size(&self) -> usize {
         self.buddy.page_size().try_to_usize().unwrap_or(0)
     }
 
     fn max_order(&self) -> u8 {
-        (MAX_ORDER - 1) as u8
+        // `NR_PAGE_ORDERS - 1` via the buddy's canonical constant
+        // (mirrors the kernel's `MAX_PAGE_ORDER`).
+        <Buddy<'static, A, NR_PAGE_ORDERS>>::MAX_ORDER as u8
     }
 
     fn alloc_pages(&mut self, order: u8) -> Result<A, Error> {

@@ -41,16 +41,18 @@
 //!
 //! const PAGE: usize = 0x1000;
 //! const PAGES: usize = 64;
-//! const MAX_ORDER: usize = 4;
+//! // `NR_PAGE_ORDERS` free areas, so the largest order (`Buddy::MAX_ORDER`)
+//! // is 3 and the biggest block is 8 pages.
+//! const NR_PAGE_ORDERS: usize = 4;
 //!
 //! // A real allocation standing in for physical memory.
-//! let layout = Layout::from_size_align(PAGES * PAGE, PAGE << (MAX_ORDER - 1)).unwrap();
+//! let layout = Layout::from_size_align(PAGES * PAGE, PAGE << (NR_PAGE_ORDERS - 1)).unwrap();
 //! // SAFETY: `layout` has a non-zero size.
 //! let memory = NonNull::new(unsafe { std::alloc::alloc(layout) }).unwrap();
 //! let base = memory.as_ptr() as usize;
 //!
 //! let mut descriptors = vec![Page::EMPTY; PAGES];
-//! let mut buddy = Buddy::<usize, MAX_ORDER>::new(base, PAGE, &mut descriptors).unwrap();
+//! let mut buddy = Buddy::<usize, NR_PAGE_ORDERS>::new(base, PAGE, &mut descriptors).unwrap();
 //! buddy.free_range(base, base + PAGES * PAGE).unwrap();
 //!
 //! // SAFETY: the identity mapping covers the allocation.
