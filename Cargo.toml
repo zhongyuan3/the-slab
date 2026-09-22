@@ -4,6 +4,10 @@ version = "0.1.0"
 edition = "2024"
 description = "A no_std reimplementation of the Linux kernel's SLUB-style slab allocator"
 license = "MIT"
+repository = "https://github.com/zhongyuan3/the-slab"
+readme = "README.md"
+keywords = ["no-std", "memory-allocator", "slab-allocator"]
+categories = ["no-std", "memory-management"]
 rust-version = "1.85"
 
 [dependencies]
