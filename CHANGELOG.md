@@ -54,6 +54,13 @@ All notable changes to this project are documented in this file.
   `zone.free_ranges(memblock.free_mem_ranges(flags))`. The previous
   `Zone::free_memblock` convenience method was removed along with the
   `memblock` feature, so memblock and buddy stay fully decoupled.
+- **Multi-page kmalloc classes.** `KernelHeap::init` now activates size
+  classes whose layout needs a multi-page slab block (for example
+  `kmalloc-4096` and `kmalloc-8192` on 4 KiB pages). `free` and
+  `usable_size` locate the owning allocation by checking the page-aligned
+  large tag first, then the page-base slab header, and finally each active
+  cache's block alignment. The large path remains for requests beyond the
+  largest class and for alignments that no class can satisfy.
 
 ### Compatibility
 

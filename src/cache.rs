@@ -361,7 +361,8 @@ impl ObjectCache {
     /// `ptr` must be a pointer returned by [`ObjectCache::alloc`] or
     /// [`ObjectCache::try_alloc_cached`] for this cache, must still be live,
     /// and must remain readable and writable. The slab header and object
-    /// metadata are read through the page mapping.
+    /// metadata are read through the page mapping, which must be readable
+    /// and initialized.
     ///
     /// # Errors
     ///

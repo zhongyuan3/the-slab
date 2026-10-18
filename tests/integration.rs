@@ -229,9 +229,10 @@ fn heap_across_classes_roundtrip() {
         let mut heap = KernelHeap::uninit();
         heap.init(&pages).unwrap();
 
-        // Requests up to the largest single-page class come from slabs.
+        // Requests up to the largest class come from slabs, including the
+        // multi-page 4096 and 8192 classes.
         let mut live = Vec::new();
-        for &size in &[1usize, 8, 9, 64, 96, 100, 192, 256, 1024, 2048] {
+        for &size in &[1usize, 8, 9, 64, 96, 100, 192, 256, 1024, 2048, 4096, 8192] {
             for round in 0..4u8 {
                 let object = heap.alloc(&mut pages, size).unwrap();
                 let usable = heap_usable(&heap, &pages, object).unwrap();
@@ -267,7 +268,7 @@ fn heap_across_classes_roundtrip() {
 }
 
 #[test]
-fn heap_large_uses_the_page_allocator() {
+fn heap_multipage_classes_and_large_path() {
     const MEMORY_PAGES: usize = 64;
     let memory = Memory::new(MEMORY_PAGES);
     let base = memory.base();
@@ -282,6 +283,12 @@ fn heap_large_uses_the_page_allocator() {
 
         let mut heap = KernelHeap::uninit();
         heap.init(&pages).unwrap();
+
+        // The 4 KiB and 8 KiB classes use multi-page slabs.
+        let class_4k = KernelHeap::class_index(4096).unwrap();
+        let class_8k = KernelHeap::class_index(8192).unwrap();
+        assert!(heap.cache(class_4k).is_some());
+        assert!(heap.cache(class_8k).is_some());
 
         for size in [4096usize, 5000, 16384] {
             let object = heap.alloc(&mut pages, size).unwrap();
@@ -434,13 +441,13 @@ fn alloc_layout_honors_size_and_alignment() {
         assert!(heap_usable(&heap, &pages, object).unwrap() >= 10_000);
         heap_free(&mut heap, &mut pages, object).unwrap();
 
-        // Over-aligned requests that no class can serve are rejected:
-        // class 4096 would need a multi-page slab on 4 KiB pages.
+        // A multi-page class can serve an over-aligned request: class 4096
+        // uses a two-page slab on 4 KiB pages.
         let layout = Layout::from_size_align(64, 4096).unwrap();
-        assert!(matches!(
-            heap.alloc_layout(&mut pages, layout),
-            Err(Error::InvalidAlign)
-        ));
+        let object = heap.alloc_layout(&mut pages, layout).unwrap();
+        assert_eq!(object.as_ptr().addr() % 4096, 0);
+        assert_eq!(heap_usable(&heap, &pages, object).unwrap(), 4096);
+        heap_free(&mut heap, &mut pages, object).unwrap();
 
         // Zero-sized layouts are rejected like `alloc(0)`.
         let layout = Layout::from_size_align(0, 8).unwrap();

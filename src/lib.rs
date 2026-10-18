@@ -104,8 +104,6 @@
 //! - `TODO(color)`: slab coloring to spread objects across cache lines.
 //! - `TODO(poison)`: `SLAB_POISON`/red zones and full object checking.
 //! - `TODO(ctor)`: constructors and destructors.
-//! - `TODO(kmalloc)`: multi-page kmalloc classes; the kernel's two-page
-//!   `kmalloc-4k`/`kmalloc-8k` are served by the large path here.
 
 #![no_std]
 
