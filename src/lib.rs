@@ -1,5 +1,5 @@
 //! A `no_std` reimplementation of the Linux kernel's SLUB-style slab
-//! allocator (`mm/slub.c`), layered on top of the buddy page allocator.
+//! allocator (`mm/slub.c`).
 //!
 //! Each [`ObjectCache`] manages fixed-size objects carved out of page blocks
 //! requested from a [`PageAlloc`]. A slab block starts with a slab header
@@ -14,22 +14,35 @@
 //! ```text
 //! ObjectCache::alloc/free            kmem_cache_alloc / kmem_cache_free
 //!     |
-//! PageAlloc (BuddyPages)           alloc_pages / __free_pages
+//! PageAlloc                         alloc_pages / __free_pages
 //!     |
-//! PhysMap (DirectMap)              the kernel's direct map
+//! PhysMap                            the kernel's direct map
 //!     |
-//! the-buddy-system                 the buddy page allocator
+//! the-buddy-system (optional)        the buddy page allocator
 //! ```
 //!
-//! [`BuddyPages`] pairs a [`Buddy`](the_buddy_system::Buddy) allocator with
-//! a [`DirectMap`], so a kernel only has to supply its direct-map offset.
-//! Locking stays with the caller, as in the buddy crate: the cache core is
-//! `&mut self`, and [`ObjectCache::try_alloc_cached`] is the
-//! allocator-free fast path.
+//! The slab core depends only on the [`PageAlloc`]/[`PhysMap`] traits and on
+//! the shared [`the_mm_core`] address traits. It does not depend on a
+//! concrete page allocator:
+//!
+//! - with the `buddy` feature, `BuddyPages` and `Zone` adapt
+//!   `the_buddy_system::Buddy`;
+//! - without it, implement [`PageAlloc`] over your own page source. Any
+//!   allocator, including a kernel-specific one, can serve slab caches.
+//!
+//! The boot handoff is explicit: feed `Zone::free_ranges` with a boot
+//! allocator's free ranges (for example a memblock's). The slab crate has no
+//! memblock dependency, and the buddy crate has none either.
+//!
+//! Locking stays with the caller: the cache core is `&mut self`, and
+//! [`ObjectCache::try_alloc_cached`] is the allocator-free fast path. Each
+//! cache stores a stable [`CacheId`] in its slab headers, so moving an
+//! initialized cache or [`KernelHeap`] does not invalidate its slabs.
 //!
 //! # Examples
 //!
 //! ```
+//! # #[cfg(feature = "buddy")] {
 //! use core::alloc::Layout;
 //! use core::ptr::NonNull;
 //!
@@ -66,6 +79,7 @@
 //! assert_eq!(object.as_ptr() as usize % 8, 0);
 //! cache.free(&mut pages, object).unwrap();
 //! cache.destroy(&mut pages).unwrap();
+//! # }
 //! ```
 //!
 //! # Kernel references
@@ -94,16 +108,25 @@
 
 #![no_std]
 
+pub use crate::cache::CacheId;
 pub use crate::cache::ObjectCache;
 pub use crate::error::Error;
 pub use crate::heap::KernelHeap;
 pub use crate::layout::SlabLayout;
-pub use crate::pages::BuddyPages;
 pub use crate::pages::DirectMap;
 pub use crate::pages::PageAlloc;
 pub use crate::pages::PhysMap;
-pub use crate::pages::Zone;
+pub use the_mm_core;
+pub use the_mm_core::PageFrame;
+pub use the_mm_core::PhysAddr;
 
+#[cfg(feature = "buddy")]
+pub use crate::buddy::BuddyPages;
+#[cfg(feature = "buddy")]
+pub use crate::buddy::Zone;
+
+#[cfg(feature = "buddy")]
+pub mod buddy;
 pub mod cache;
 pub mod error;
 pub mod heap;

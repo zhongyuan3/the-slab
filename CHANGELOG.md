@@ -2,6 +2,55 @@
 
 All notable changes to this project are documented in this file.
 
+## [Unreleased]
+
+### Added
+
+- **Optional `buddy` feature.** `BuddyPages`, `Zone` and the buddy error
+  mapping now live in the new `crate::buddy` module behind
+  `features = ["buddy"]`. The slab core (`ObjectCache`, `KernelHeap`,
+  `SlabLayout`, `PageAlloc`, `PhysMap`, `DirectMap`) has no buddy or
+  memblock dependency.
+- `Zone::free_range` and `Zone::free_ranges` pass boot memory through to the
+  owned arena, so the handoff is one explicit call on the page allocator.
+- `the-mm-core` is re-exported together with its `PhysAddr` and
+  `PageFrame` traits.
+
+### Changed
+
+- **The slab core is allocator-neutral.** `crate::pages` now contains only
+  the `PageAlloc`/`PhysMap` traits and `DirectMap`; the buddy adapters moved
+  to `crate::buddy`. `cache` and `heap` import the address traits from
+  `the-mm-core`.
+- `the-buddy-system` is an optional dependency; the default feature set is
+  empty. The slab library has no memblock dependency at all.
+- **PFN conversions moved to `PageFrame`.** The shared `PageFrame` trait
+  now owns `phys_to_pfn`, `pfn_to_phys` and `pfn_ceil` in addition to the
+  `usize` index conversions. Custom `PageFrame` implementations must
+  provide the new methods; the `the-slab` API itself is unchanged.
+- `PhysMap` gained checked `try_phys_to_virt` and `try_virt_to_phys`
+  methods. `DirectMap` overrides them to reject addresses below the mapping
+  instead of panicking, and `ObjectCache::free`/`KernelHeap::free` use them
+  so a stray pointer below the map is reported as `Error::InvalidPointer`.
+- **Move-safe cache identity.** `ObjectCache` now stores a stable `CacheId`
+  in each slab header instead of comparing a freshly computed `self`
+  address on every free. `CacheId` is allocated from a process-wide counter
+  by `init`, or supplied explicitly with `init_with_id`; `KernelHeap`
+  assigns one per class. Moving an initialized cache or heap therefore keeps
+  frees working. `CacheId` is re-exported at the crate root; the default id
+  source is a process-wide `AtomicUsize` counter, while `init_with_id`
+  accepts an explicit id.
+- The boot handoff is explicit:
+  `zone.free_ranges(memblock.free_mem_ranges(flags))`. The previous
+  `Zone::free_memblock` convenience method was removed along with the
+  `memblock` feature, so memblock and buddy stay fully decoupled.
+
+### Compatibility
+
+- Enable `features = ["buddy"]` to keep using `BuddyPages` and `Zone`.
+- Replace `zone.free_memblock(&mb)` with
+  `zone.free_ranges(mb.free_mem_ranges(flags))`.
+
 ## [0.1.0]
 
 ### Added

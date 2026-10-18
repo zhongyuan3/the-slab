@@ -31,9 +31,11 @@
 
 use core::mem::size_of;
 use core::ptr::NonNull;
+use core::sync::atomic::AtomicUsize;
+use core::sync::atomic::Ordering;
 
-use the_buddy_system::PageFrame;
-use the_memblock::PhysAddr;
+use the_mm_core::PageFrame;
+use the_mm_core::PhysAddr;
 
 use crate::error::Error;
 use crate::header::SLAB_MAGIC;
@@ -50,6 +52,41 @@ const MIN_OBJECTS: usize = 4;
 /// allocator, mirroring SLUB's default `min_partial`.
 const DEFAULT_MIN_PARTIAL: usize = 5;
 
+/// A stable identity token stored in every slab header.
+///
+/// `ObjectCache` compares the token in a slab header with its own id to
+/// reject frees through the wrong cache. Because the id is captured at
+/// initialization and stored in the cache, moving the cache does not
+/// invalidate its slabs (unlike comparing a fresh `self` address).
+///
+/// Ids must be unique among live caches. [`ObjectCache::init`] draws one from
+/// a process-wide counter, and [`ObjectCache::init_with_id`] lets the caller
+/// supply one explicitly (for example for reproducible tests).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CacheId(usize);
+
+impl CacheId {
+    /// The placeholder id of an uninitialized cache.
+    pub(crate) const ZERO: Self = Self(0);
+
+    /// Creates an id from a raw value.
+    pub const fn new(value: usize) -> Self {
+        Self(value)
+    }
+
+    /// Returns the raw value.
+    pub const fn get(self) -> usize {
+        self.0
+    }
+
+    /// Allocates the next unique id.
+    pub(crate) fn next() -> Self {
+        // Start at one so a generated id never collides with `ZERO`.
+        static NEXT_ID: AtomicUsize = AtomicUsize::new(1);
+        Self(NEXT_ID.fetch_add(1, Ordering::Relaxed))
+    }
+}
+
 /// A slab cache, the counterpart of the kernel's `struct kmem_cache`.
 ///
 /// The cache is usable without a global allocator: it is defined in place
@@ -57,15 +94,15 @@ const DEFAULT_MIN_PARTIAL: usize = 5;
 /// [`ObjectCache::init`], following the same `uninit`/`init` pattern as the
 /// buddy allocator.
 ///
-/// The cache stores its own address in every slab header to reject frees
-/// through the wrong cache, so it must not move while its slabs are alive;
-/// a moved cache fails safely (frees are rejected as
-/// [`Error::InvalidPointer`]) but its slabs leak until they are released
-/// through the stale address. Kernels define caches in statics, which
-/// satisfies the requirement by construction.
+/// Every slab header stores the cache's [`CacheId`], captured when the cache
+/// is initialized. Moving the cache therefore does not invalidate its slabs;
+/// free operations still match the stored id. The id must be unique among
+/// live caches, which [`ObjectCache::init`] ensures for caches at distinct
+/// addresses and [`ObjectCache::init_with_id`] lets the caller control.
 #[derive(Debug)]
 pub struct ObjectCache {
     name: &'static str,
+    id: CacheId,
     layout: SlabLayout,
     /// Slab currently receiving allocations (`cpu_slab`).
     current: Option<NonNull<SlabHeader>>,
@@ -94,6 +131,7 @@ impl ObjectCache {
     pub const fn uninit() -> Self {
         Self {
             name: "",
+            id: CacheId::ZERO,
             layout: SlabLayout::EMPTY,
             current: None,
             partial: None,
@@ -108,6 +146,11 @@ impl ObjectCache {
     /// Returns `true` once [`ObjectCache::init`] has computed a layout.
     pub const fn is_initialized(&self) -> bool {
         self.layout.slab_bytes() != 0
+    }
+
+    /// Returns the cache's stable identity token.
+    pub const fn id(&self) -> CacheId {
+        self.id
     }
 
     /// Initializes the cache, computing the slab layout from `pages`.
@@ -138,12 +181,31 @@ impl ObjectCache {
         self.init_with_min_objects(pages, name, size, align, MIN_OBJECTS)
     }
 
+    /// Like [`ObjectCache::init`], but with an explicit identity token.
+    ///
+    /// Use this when the cache may be recreated at the same address, or when
+    /// several caches are created in a loop and must have distinct ids.
+    /// The id is stored in every slab header and is compared on free.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`ObjectCache::init`].
+    pub fn init_with_id<PA: PageAlloc>(
+        &mut self,
+        pages: &PA,
+        id: CacheId,
+        name: &'static str,
+        size: usize,
+        align: usize,
+    ) -> Result<(), Error> {
+        self.init_with_id_and_min_objects(pages, id, name, size, align, MIN_OBJECTS)
+    }
+
     /// Like [`ObjectCache::init`], but with an explicit `min_objects` target
     /// (SLUB's `slub_min_objects`) instead of the default of four.
     ///
-    /// [`KernelHeap`](crate::heap::KernelHeap) passes `1` so that
-    /// every kmalloc slab stays on a single page, which its `free` relies
-    /// on to find the owning cache from an object pointer.
+    /// The cache id is drawn from a process-wide counter. `KernelHeap`
+    /// also draws one per class, so every live cache has a distinct id.
     ///
     /// # Errors
     ///
@@ -151,6 +213,20 @@ impl ObjectCache {
     pub fn init_with_min_objects<PA: PageAlloc>(
         &mut self,
         pages: &PA,
+        name: &'static str,
+        size: usize,
+        align: usize,
+        min_objects: usize,
+    ) -> Result<(), Error> {
+        let id = CacheId::next();
+        self.init_with_id_and_min_objects(pages, id, name, size, align, min_objects)
+    }
+
+    /// Shared body of the initialization methods, with an explicit id.
+    pub(crate) fn init_with_id_and_min_objects<PA: PageAlloc>(
+        &mut self,
+        pages: &PA,
+        id: CacheId,
         name: &'static str,
         size: usize,
         align: usize,
@@ -172,12 +248,10 @@ impl ObjectCache {
 
         // The block size must be expressible in the address type used to
         // align objects down to their slab.
-        let slab_bytes = PA::Addr::from_usize(layout.slab_bytes());
-        if slab_bytes.try_to_usize() != Some(layout.slab_bytes()) {
-            return Err(Error::ObjectTooLarge);
-        }
+        PA::Addr::try_from_usize(layout.slab_bytes()).ok_or(Error::ObjectTooLarge)?;
 
         self.name = name;
+        self.id = id;
         self.layout = layout;
         self.current = None;
         self.partial = None;
@@ -295,11 +369,14 @@ impl ObjectCache {
             return Err(Error::Uninitialized);
         }
 
-        let owner = (self as *const ObjectCache).cast::<()>();
-        let phys = pages.virt_to_phys(ptr);
-        let slab_bytes = PA::Addr::from_usize(self.layout.slab_bytes());
+        let phys = pages.try_virt_to_phys(ptr).ok_or(Error::InvalidPointer)?;
+        let slab_bytes =
+            PA::Addr::try_from_usize(self.layout.slab_bytes()).ok_or(Error::ObjectTooLarge)?;
         let base = PA::Addr::align_down(phys, slab_bytes);
-        let slab = pages.phys_to_virt(base).cast::<SlabHeader>();
+        let slab = pages
+            .try_phys_to_virt(base)
+            .ok_or(Error::InvalidPointer)?
+            .cast::<SlabHeader>();
 
         // SAFETY: `base` is block aligned, so the header resides at a
         // valid, aligned location. It is either a live slab of some cache
@@ -310,7 +387,7 @@ impl ObjectCache {
             if header.magic != SLAB_MAGIC {
                 return Err(Error::InvalidPointer);
             }
-            if header.owner != owner {
+            if header.owner != self.id {
                 return Err(Error::CrossCacheFree);
             }
             if header.order != self.layout.order() {
@@ -492,8 +569,7 @@ impl ObjectCache {
         // SAFETY: the caller guarantees `slab` is owned by this cache.
         unsafe {
             let header = &*slab.as_ptr();
-            let owner = (self as *const ObjectCache).cast::<()>();
-            if header.magic != SLAB_MAGIC || header.owner != owner {
+            if header.magic != SLAB_MAGIC || header.owner != self.id {
                 return Err(Error::CorruptSlab);
             }
             if header.order != self.layout.order() || header.objects != self.layout.objects() {
@@ -593,7 +669,7 @@ impl ObjectCache {
         // slab_bytes`).
         unsafe {
             let header = &mut *slab.as_ptr();
-            header.owner = (self as *const ObjectCache).cast::<()>();
+            header.owner = self.id;
             header.magic = SLAB_MAGIC;
             header.order = self.layout.order();
             header.on_partial = false;
@@ -731,6 +807,7 @@ unsafe fn get_freepointer(object: NonNull<u8>) -> Option<NonNull<u8>> {
 mod tests {
     extern crate alloc;
 
+    use alloc::boxed::Box;
     use alloc::vec;
     use alloc::vec::Vec;
     use core::alloc::Layout;
@@ -825,6 +902,14 @@ mod tests {
 
         fn virt_to_phys(&self, ptr: NonNull<u8>) -> usize {
             self.map.virt_to_phys(ptr)
+        }
+
+        fn try_phys_to_virt(&self, addr: usize) -> Option<NonNull<u8>> {
+            self.map.try_phys_to_virt(addr)
+        }
+
+        fn try_virt_to_phys(&self, ptr: NonNull<u8>) -> Option<usize> {
+            self.map.try_virt_to_phys(ptr)
         }
     }
 
@@ -1012,6 +1097,15 @@ mod tests {
             Err(Error::InvalidPointer)
         ));
 
+        // Pointer below the mapped range is rejected by the checked
+        // translation instead of panicking or underflowing.
+        let below_base = alloc.base.as_ptr().addr().checked_sub(1).unwrap();
+        let below = NonNull::new(below_base as *mut u8).unwrap();
+        assert!(matches!(
+            cache.free(&mut alloc, below),
+            Err(Error::InvalidPointer)
+        ));
+
         // A pointer of another cache with an identical layout.
         let mut other = cache_with(&alloc, 24, 8);
         let other_object = other.alloc(&mut alloc).unwrap();
@@ -1027,6 +1121,20 @@ mod tests {
             cache.free(&mut alloc, object),
             Err(Error::DoubleFree)
         ));
+    }
+
+    #[test]
+    fn cache_can_move_after_init() {
+        let mut alloc = TestAlloc::new();
+        let mut cache = cache_with(&alloc, 24, 8);
+        let object = cache.alloc(&mut alloc).unwrap();
+
+        // The id is captured at init and stored in both the cache and the
+        // slab header, so moving the initialized cache must not break free.
+        let mut moved = Box::new(cache);
+        moved.free(&mut alloc, object).unwrap();
+        assert_eq!(moved.nr_free_objects(), moved.nr_objects());
+        (*moved).destroy(&mut alloc).unwrap();
     }
 
     #[test]

@@ -23,9 +23,10 @@ use core::alloc::Layout;
 use core::mem::size_of;
 use core::ptr::NonNull;
 
-use the_buddy_system::PageFrame;
-use the_memblock::PhysAddr;
+use the_mm_core::PageFrame;
+use the_mm_core::PhysAddr;
 
+use crate::cache::CacheId;
 use crate::cache::ObjectCache;
 use crate::error::Error;
 use crate::header::SLAB_MAGIC;
@@ -158,7 +159,9 @@ impl KernelHeap {
             // which `free` relies on to find the cache by page-aligning
             // the object pointer.
             let align = natural_alignment(size).min(page_size);
-            match cache.init_with_min_objects(pages, CLASS_NAMES[index], size, align, 1) {
+            let id = CacheId::next();
+            match cache.init_with_id_and_min_objects(pages, id, CLASS_NAMES[index], size, align, 1)
+            {
                 Ok(()) if cache.layout().order() == 0 => {
                     self.caches[index] = cache;
                     self.active[index] = true;
@@ -363,7 +366,7 @@ impl KernelHeap {
             return Err(Error::Uninitialized);
         }
 
-        let (page, page_phys, magic) = self.page_tag(pages, ptr);
+        let (page, page_phys, magic) = self.page_tag(pages, ptr).ok_or(Error::InvalidPointer)?;
         match magic {
             SLAB_MAGIC => {
                 // SAFETY: the magic matched, so the page starts with a
@@ -403,7 +406,7 @@ impl KernelHeap {
             return Err(Error::Uninitialized);
         }
 
-        let (page, _, magic) = self.page_tag(pages, ptr);
+        let (page, _, magic) = self.page_tag(pages, ptr).ok_or(Error::InvalidPointer)?;
         match magic {
             SLAB_MAGIC => {
                 // SAFETY: the magic matched, so the page starts with a
@@ -546,25 +549,31 @@ impl KernelHeap {
 
     /// Locates the page containing `ptr` and reads its first word, which
     /// is the slab magic or the large tag magic.
-    fn page_tag<PA: PageAlloc>(&self, pages: &PA, ptr: NonNull<u8>) -> (NonNull<u8>, PA::Addr, u32) {
-        let phys = pages.virt_to_phys(ptr);
-        let page_size = PA::Addr::from_usize(self.page_size);
+    ///
+    /// Returns `None` when the pointer is outside the mapped range, so a
+    /// stray pointer is rejected without panicking in the mapping layer.
+    fn page_tag<PA: PageAlloc>(
+        &self,
+        pages: &PA,
+        ptr: NonNull<u8>,
+    ) -> Option<(NonNull<u8>, PA::Addr, u32)> {
+        let phys = pages.try_virt_to_phys(ptr)?;
+        let page_size = PA::Addr::try_from_usize(self.page_size)?;
         let page_phys = PA::Addr::align_down(phys, page_size);
-        let page = pages.phys_to_virt(page_phys);
+        let page = pages.try_phys_to_virt(page_phys)?;
         // SAFETY: `page` is page aligned. Its first word is written by
         // this module for live allocations and is arbitrary (initialized)
         // memory otherwise; the magic checks reject the latter.
         let magic = unsafe { page.cast::<u32>().read() };
-        (page, page_phys, magic)
+        Some((page, page_phys, magic))
     }
 
-    /// Returns the index of the active cache whose address matches
-    /// `owner`.
-    fn cache_index(&self, owner: *const ()) -> Option<usize> {
-        self.caches.iter().enumerate().find_map(|(index, cache)| {
-            let address = core::ptr::from_ref(cache).cast::<()>();
-            (self.active[index] && address == owner).then_some(index)
-        })
+    /// Returns the index of the active cache whose id matches `owner`.
+    fn cache_index(&self, owner: CacheId) -> Option<usize> {
+        self.caches
+            .iter()
+            .enumerate()
+            .find_map(|(index, cache)| (self.active[index] && cache.id() == owner).then_some(index))
     }
 }
 

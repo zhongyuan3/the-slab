@@ -2,6 +2,8 @@
 
 use core::ptr::NonNull;
 
+use crate::cache::CacheId;
+
 /// Magic written into every slab header and checked by `free` and
 /// `validate`.
 pub(crate) const SLAB_MAGIC: u32 = 0x5AB0_9001;
@@ -27,9 +29,9 @@ pub(crate) struct SlabHeader {
     pub(crate) order: u8,
     /// `true` while the slab is linked into the cache's partial list.
     pub(crate) on_partial: bool,
-    /// Identity of the owning cache (its address, erased); lets `free`
-    /// reject pointers passed to the wrong cache.
-    pub(crate) owner: *const (),
+    /// Identity of the owning cache; lets `free` reject pointers passed to
+    /// the wrong cache or to a cache that is not part of the kernel heap.
+    pub(crate) owner: CacheId,
     /// Number of objects currently handed out.
     pub(crate) inuse: usize,
     /// Number of objects in the block.

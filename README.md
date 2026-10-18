@@ -1,7 +1,7 @@
 # the-slab
 
 A `no_std` reimplementation of the Linux kernel's [SLUB] slab allocator
-(`mm/slub.c`), layered on top of [the-buddy-system].
+(`mm/slub.c`), with optional adapters for [the-buddy-system].
 
 Each `ObjectCache` carves page blocks requested from the page allocator into
 fixed-size objects. A slab block starts with a header and is followed by
@@ -10,6 +10,12 @@ inside themselves (`set_freepointer`), exactly like SLUB. The cache keeps
 one active slab (`cpu_slab`) plus a doubly linked partial list
 (`kmem_cache_node`) and returns empty slabs to the page allocator once
 `min_partial` is exceeded.
+
+The slab core depends only on the shared
+[`the-mm-core`](https://crates.io/crates/the-mm-core) address traits and on
+the `PageAlloc`/`PhysMap` abstractions, not on a concrete page allocator.
+The `buddy` feature adds `BuddyPages` and `Zone`; any other page source can
+implement `PageAlloc` instead.
 
 [SLUB]: https://www.kernel.org/doc/html/latest/core-api/memory-allocation.html
 [the-buddy-system]: https://crates.io/crates/the-buddy-system
@@ -20,10 +26,13 @@ one active slab (`cpu_slab`) plus a doubly linked partial list
   local, a `Box`, or a `static`) and initialized once with
   `ObjectCache::init`, following the same `uninit`/`init` pattern as the
   buddy allocator.
-- Kernel-shaped layers: `ObjectCache` over a `PageAlloc` abstract
-  (`BuddyPages` borrows the buddy allocator, `Zone` owns it so the page
-  allocator itself can live in a `static`), over a `PhysMap` (`DirectMap`
-  covers the common direct-map case and is also `static`-friendly).
+- Kernel-shaped layers: `ObjectCache` over a `PageAlloc` abstraction,
+  over a `PhysMap` (`DirectMap` covers the common direct-map case and is
+  also `static`-friendly). The slab core has no buddy dependency.
+- Optional `buddy` feature: `BuddyPages` borrows the buddy allocator and
+  `Zone` owns it, so the page allocator itself can live in a `static`.
+  The slab library has no memblock dependency; the boot handoff is an
+  explicit `free_ranges` call.
 - SLUB algorithms and states: `calculate_order`/`calculate_sizes` layout,
   in-object free lists, active slab + partial list, `min_partial`, and
   `alloc_zeroed`.
@@ -39,9 +48,18 @@ one active slab (`cpu_slab`) plus a doubly linked partial list
   enforcement, and a `validate()` invariant checker (headers, free lists,
   partial list, accounting) mirroring SLUB's `check_object`.
 - `Send` for lock wrapping; caches can live in `static`s.
+- Move-safe cache identity: every slab header stores a `CacheId` captured at
+  initialization (or supplied with `init_with_id`), so moving an initialized
+  cache or `KernelHeap` does not invalidate its slabs.
 - Validated under Miri with both aliasing models and strict provenance.
 
 ## Usage
+
+The examples below use the `buddy` feature:
+
+```toml
+the-slab = { version = "0.1", features = ["buddy"] }
+```
 
 ```rust
 use core::alloc::Layout;
@@ -130,9 +148,9 @@ over-aligned blocks.
 ## Page allocator statics
 
 Caches and the kernel heap are typically statics, while `BuddyPages`
-borrows the buddy allocator and therefore cannot be one. `Zone` owns a
-buddy arena plus its `DirectMap`, so the page allocator can be a static
-too:
+borrows the buddy allocator and therefore cannot be one. With the `buddy`
+feature, `Zone` owns a buddy arena plus its `DirectMap`, so the page
+allocator can be a static too:
 
 ```rust
 use std::sync::Mutex;
@@ -146,7 +164,7 @@ let mut zone = ZONE.lock().unwrap();
 // SAFETY: the descriptors and the mapping are valid for the rest of the
 // system, and all access goes through the lock.
 unsafe { zone.init(vmemmap, nr_pages, base, page_size, virt_base) }.unwrap();
-zone.buddy_mut().free_memblock(&memblock).unwrap();
+zone.free_ranges(memblock.free_mem_ranges(flags)).unwrap();
 drop(zone);
 
 // Caches borrow the zone for the duration of each call.
@@ -157,10 +175,26 @@ let object = CACHE.lock().unwrap().alloc(&mut *ZONE.lock().unwrap()).unwrap();
 ## Boot handoff
 
 The intended kernel sequence is `memblock` → buddy → slab: reserve the
-kernel image in `memblock`, hand the remaining memory to the buddy
-allocator with `Buddy::free_memblock`, then serve object allocations from
-caches on top. See `tests/integration.rs` for the full flow, including
-that memory reserved during boot is never handed out.
+kernel image in `memblock`, hand the remaining memory to the page allocator,
+then serve object allocations from caches on top. The handoff is explicit,
+so neither the buddy nor the slab crate depends on memblock:
+
+```rust
+let memblock = MEMBLOCK.lock().unwrap();
+zone.free_ranges(memblock.free_mem_ranges(MemblockFlags::NONE)).unwrap();
+```
+
+`Zone::free_ranges` and `Buddy::free_ranges` accept any `(start, end)`
+iterator, so the same code works with a range snapshot or a different boot
+allocator. See `tests/integration.rs` for the full flow, including that
+memory reserved during boot is never handed out.
+
+## Using without the buddy feature
+
+The core (`ObjectCache`, `KernelHeap`, `SlabLayout`, `PageAlloc`,
+`PhysMap`, `DirectMap`) compiles with no buddy or memblock dependency.
+Implement `PageAlloc` and `PhysMap` for your own page source to use the
+same caches over a different physical page allocator.
 
 ## Testing
 

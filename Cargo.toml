@@ -12,8 +12,15 @@ categories = ["no-std", "memory-management"]
 rust-version = "1.85"
 
 [dependencies]
-the-buddy-system = { path = "../the-buddy-system", version = "0.1.0" }
-the-memblock = { path = "../the-memblock", version = "0.2.0" }
+the-mm-core = { path = "../the-mm-core", version = "0.1.0" }
+the-buddy-system = { path = "../the-buddy-system", version = "0.1.0", optional = true }
+
+[features]
+default = []
+# Buddy adapters: `BuddyPages` and `Zone` implement `PageAlloc`.
+buddy = ["dep:the-buddy-system"]
 
 [dev-dependencies]
+# Integration tests exercise the explicit boot handoff; the slab library
+# itself has no memblock dependency.
 the-memblock = { path = "../the-memblock", version = "0.2.0" }

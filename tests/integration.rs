@@ -1,5 +1,7 @@
 //! Integration tests: `memblock` → buddy → slab, over real memory.
 
+#![cfg(feature = "buddy")]
+
 use core::alloc::Layout;
 use core::ptr::NonNull;
 use std::sync::Mutex;
@@ -115,7 +117,9 @@ fn boot_handoff_from_memblock_to_slab() {
 
     let mut descriptors = vec![Page::EMPTY; PAGES];
     let mut buddy = Buddy::<usize, NR_PAGE_ORDERS>::new(base, PAGE, &mut descriptors).unwrap();
-    buddy.free_memblock(&mb).unwrap();
+    buddy
+        .free_ranges(mb.free_mem_ranges(MemblockFlags::NONE))
+        .unwrap();
 
     {
         // SAFETY: the identity mapping covers the backing allocation.
@@ -540,9 +544,7 @@ fn static_zone_object_cache_and_heap_share_the_page_allocator() {
         // SAFETY: the leaked descriptors and backing memory live for the
         // rest of the process, and all access goes through the lock.
         unsafe { zone.init(ptr, PAGES, base, PAGE, memory.ptr) }.unwrap();
-        zone.buddy_mut()
-            .free_range(base, base + PAGES * PAGE)
-            .unwrap();
+        zone.free_range(base, base + PAGES * PAGE).unwrap();
         assert_eq!(zone.buddy().nr_free(), PAGES);
     }
 
@@ -600,4 +602,59 @@ fn static_zone_object_cache_and_heap_share_the_page_allocator() {
 
     // The backing allocation stays alive through the zone's mapping.
     core::mem::forget(memory);
+}
+
+/// The explicit boot handoff: the boot allocator's free ranges go straight
+/// into the zone, without either crate depending on memblock.
+#[test]
+fn zone_accepts_memblock_free_ranges() {
+    let memory = Memory::new(PAGES);
+    let base = memory.base();
+
+    let mut mb = Memblock::<usize, 16>::new();
+    mb.add(base, PAGES * PAGE, MemblockFlags::NONE).unwrap();
+    mb.reserve_kern(base, 2 * PAGE).unwrap();
+
+    let mut descriptors = vec![Page::EMPTY; PAGES];
+    let mut zone = Zone::<usize, NR_PAGE_ORDERS>::uninit();
+    let ptr = NonNull::new(descriptors.as_mut_ptr()).unwrap();
+
+    // SAFETY: the descriptors and the identity mapping outlive the zone,
+    // and all access goes through it.
+    unsafe { zone.init(ptr, PAGES, base, PAGE, memory.ptr) }.unwrap();
+    zone.free_ranges(mb.free_mem_ranges(MemblockFlags::NONE))
+        .unwrap();
+
+    assert_eq!(zone.buddy().nr_free(), PAGES - 2);
+    zone.buddy().validate().unwrap();
+}
+
+/// The heap assigns a stable id to each class cache, so moving the heap
+/// after initialization does not invalidate the slabs already allocated.
+#[test]
+fn heap_can_move_after_init() {
+    const MEMORY_PAGES: usize = 64;
+    let memory = Memory::new(MEMORY_PAGES);
+    let base = memory.base();
+    let mut descriptors = vec![Page::EMPTY; MEMORY_PAGES];
+    let mut buddy = Buddy::<usize, NR_PAGE_ORDERS>::new(base, PAGE, &mut descriptors).unwrap();
+    buddy.free_range(base, base + MEMORY_PAGES * PAGE).unwrap();
+
+    {
+        // SAFETY: the identity mapping covers the backing allocation.
+        let map = unsafe { DirectMap::new(base, memory.ptr) };
+        let mut pages = BuddyPages::new(&mut buddy, map);
+
+        let mut heap = KernelHeap::uninit();
+        heap.init(&pages).unwrap();
+        let object = heap.alloc(&mut pages, 64).unwrap();
+
+        // Move the initialized heap to a new location.
+        let mut moved = Box::new(heap);
+        moved.free(&mut pages, object).unwrap();
+        (*moved).destroy(&mut pages).unwrap();
+    }
+
+    // Every page went back to the buddy allocator.
+    assert_eq!(buddy.nr_free(), MEMORY_PAGES);
 }
