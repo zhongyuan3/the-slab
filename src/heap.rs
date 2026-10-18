@@ -119,8 +119,7 @@ enum Located<A> {
 /// then the large-block tag; no side table is needed.
 #[derive(Debug)]
 pub struct KernelHeap {
-    caches: [ObjectCache; CLASS_COUNT],
-    active: [bool; CLASS_COUNT],
+    caches: [Option<ObjectCache>; CLASS_COUNT],
     page_size: usize,
     initialized: bool,
 }
@@ -129,8 +128,7 @@ impl KernelHeap {
     /// A `const` placeholder for static definitions.
     pub const fn uninit() -> Self {
         Self {
-            caches: [const { ObjectCache::uninit() }; CLASS_COUNT],
-            active: [false; CLASS_COUNT],
+            caches: [const { None }; CLASS_COUNT],
             page_size: 0,
             initialized: false,
         }
@@ -179,8 +177,7 @@ impl KernelHeap {
             match cache.init_with_id_and_min_objects(pages, id, CLASS_NAMES[index], size, align, 1)
             {
                 Ok(()) => {
-                    self.caches[index] = cache;
-                    self.active[index] = true;
+                    self.caches[index] = Some(cache);
                 }
                 // Classes that do not fit any order are served by the large
                 // path.
@@ -206,7 +203,7 @@ impl KernelHeap {
         let size = layout.size();
         let align = layout.align();
         (0..CLASS_COUNT).find(|&index| {
-            self.active[index]
+            self.caches[index].is_some()
                 && SIZE_CLASSES[index] >= size
                 && natural_alignment(SIZE_CLASSES[index]) >= align
         })
@@ -214,11 +211,7 @@ impl KernelHeap {
 
     /// Returns the cache of a class, if the class has one.
     pub fn cache(&self, index: usize) -> Option<&ObjectCache> {
-        if index < CLASS_COUNT && self.active[index] {
-            Some(&self.caches[index])
-        } else {
-            None
-        }
+        self.caches.get(index).and_then(|cache| cache.as_ref())
     }
 
     /// Allocates at least `size` bytes (`size` must be non-zero).
@@ -244,8 +237,8 @@ impl KernelHeap {
         }
 
         if let Some(index) = Self::class_index(size) {
-            if self.active[index] {
-                return self.caches[index].alloc(pages);
+            if let Some(cache) = self.caches.get_mut(index).and_then(|cache| cache.as_mut()) {
+                return cache.alloc(pages);
             }
         }
         self.alloc_large(pages, size)
@@ -303,7 +296,9 @@ impl KernelHeap {
         }
 
         if let Some(index) = self.class_index_for_layout(layout) {
-            return self.caches[index].alloc(pages);
+            if let Some(cache) = self.caches.get_mut(index).and_then(|cache| cache.as_mut()) {
+                return cache.alloc(pages);
+            }
         }
         if layout.align() <= LARGE_TAG_SIZE {
             return self.alloc_large(pages, layout.size());
@@ -376,10 +371,10 @@ impl KernelHeap {
     /// Returns an allocation from [`KernelHeap::alloc`] to its slab
     /// or to the page allocator.
     ///
-    /// Mirrors `kfree`: large allocations are identified by the tag at the
-    /// page-aligned block base; slab objects are found by the page-base
-    /// header or by checking each active class's block alignment, so objects
-    /// anywhere in a multi-page slab can be freed.
+    /// Mirrors `kfree`: slab objects are found by walking each cache's slab
+    /// lists (active, partial and full) and checking the block range; large
+    /// allocations are identified by the tag at the page-aligned block base.
+    /// Objects anywhere in a multi-page slab can be freed.
     ///
     /// # Safety
     ///
@@ -405,9 +400,12 @@ impl KernelHeap {
         let located = self.locate(pages, ptr)?;
         match located {
             Located::Slab { index } => {
-                // SAFETY: `locate` matched the slab header's owner to this
-                // cache and the caller guarantees `ptr` is live.
-                unsafe { self.caches[index].free(pages, ptr) }
+                let Some(cache) = self.caches[index].as_mut() else {
+                    return Err(Error::InternalError);
+                };
+                // SAFETY: `locate` matched this cache and the caller
+                // guarantees `ptr` is live.
+                unsafe { cache.free(pages, ptr) }
             }
             Located::Large { page_phys, order } => pages.free_pages(page_phys, order),
         }
@@ -439,7 +437,10 @@ impl KernelHeap {
 
         let located = self.locate(pages, ptr)?;
         match located {
-            Located::Slab { index } => Ok(self.caches[index].layout().object_size()),
+            Located::Slab { index } => {
+                let cache = self.caches[index].as_ref().ok_or(Error::InternalError)?;
+                Ok(cache.layout().object_size())
+            }
             Located::Large { order, .. } => Ok((self.page_size << order) - LARGE_TAG_SIZE),
         }
     }
@@ -496,10 +497,8 @@ impl KernelHeap {
         if !self.initialized {
             return Err(Error::Uninitialized);
         }
-        for index in 0..CLASS_COUNT {
-            if self.active[index] {
-                self.caches[index].shrink(pages)?;
-            }
+        for cache in self.caches.iter_mut().flatten() {
+            cache.shrink(pages)?;
         }
         Ok(())
     }
@@ -512,11 +511,8 @@ impl KernelHeap {
         if !self.initialized {
             return Err(Error::Uninitialized);
         }
-        let active = self.active;
-        for (index, cache) in self.caches.into_iter().enumerate() {
-            if active[index] {
-                cache.destroy(pages)?;
-            }
+        for cache in self.caches.into_iter().flatten() {
+            cache.destroy(pages)?;
         }
         Ok(())
     }
@@ -526,10 +522,8 @@ impl KernelHeap {
         if !self.initialized {
             return Err(Error::Uninitialized);
         }
-        for index in 0..CLASS_COUNT {
-            if self.active[index] {
-                self.caches[index].validate(map)?;
-            }
+        for cache in self.caches.iter().flatten() {
+            cache.validate(map)?;
         }
         Ok(())
     }
@@ -585,9 +579,9 @@ impl KernelHeap {
         let phys = pages.try_virt_to_phys(ptr).ok_or(Error::InvalidPointer)?;
 
         for (index, cache) in self.caches.iter().enumerate() {
-            if !self.active[index] {
+            let Some(cache) = cache.as_ref() else {
                 continue;
-            }
+            };
             let Some(slab_bytes) = PA::Addr::try_from_usize(cache.layout().slab_bytes()) else {
                 continue;
             };

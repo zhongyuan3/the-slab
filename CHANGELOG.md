@@ -63,6 +63,9 @@ All notable changes to this project are documented in this file.
   `validate` and `destroy` now cover full slabs as well. The large path
   remains for requests beyond the largest class and for alignments that no
   class can satisfy.
+- `KernelHeap` now stores its caches as `[Option<ObjectCache>; CLASS_COUNT]`
+  instead of a cache array plus a parallel `active` bitmap, so the two
+  states cannot diverge.
 
 ### Compatibility
 
