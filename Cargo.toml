@@ -6,6 +6,7 @@ description = "A no_std reimplementation of the Linux kernel's SLUB-style slab a
 license = "MIT"
 repository = "https://github.com/zhongyuan3/the-slab"
 readme = "README.md"
+documentation = "https://docs.rs/the-slab"
 keywords = ["no-std", "memory-allocator", "slab-allocator"]
 categories = ["no-std", "memory-management"]
 rust-version = "1.85"
