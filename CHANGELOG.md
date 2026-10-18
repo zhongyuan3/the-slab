@@ -4,6 +4,16 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Breaking changes
+
+- **Pointer-taking methods are now `unsafe`.** `ObjectCache::free`,
+  `KernelHeap::free`, `KernelHeap::usable_size`, `KernelHeap::realloc` and
+  `KernelHeap::realloc_layout` require the caller to pass a live allocation
+  from the matching allocator. The methods read slab/large-allocation
+  metadata through the pointer, so this precondition can no longer be left
+  implicit in a safe function. `alloc`, `alloc_zeroed`, `alloc_layout` and
+  the allocation-free fast path remain safe.
+
 ### Added
 
 - **Optional `buddy` feature.** `BuddyPages`, `Zone` and the buddy error

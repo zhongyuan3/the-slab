@@ -48,6 +48,9 @@ implement `PageAlloc` instead.
   enforcement, and a `validate()` invariant checker (headers, free lists,
   partial list, accounting) mirroring SLUB's `check_object`.
 - `Send` for lock wrapping; caches can live in `static`s.
+- Explicit pointer contracts: `free`, `usable_size` and `realloc` are
+  `unsafe`, so the "pointer must come from this allocator" precondition is
+  visible in the type system instead of being an implicit assumption.
 - Move-safe cache identity: every slab header stores a `CacheId` captured at
   initialization (or supplied with `init_with_id`), so moving an initialized
   cache or `KernelHeap` does not invalidate its slabs.
@@ -92,7 +95,8 @@ cache.init(&pages, "widgets", 24, 8).unwrap();
 
 let object = cache.alloc(&mut pages).unwrap();
 assert_eq!(object.as_ptr() as usize % 8, 0);
-cache.free(&mut pages, object).unwrap();
+// SAFETY: `object` came from this cache and is still live.
+unsafe { cache.free(&mut pages, object) }.unwrap();
 cache.destroy(&mut pages).unwrap();
 ```
 
@@ -109,12 +113,13 @@ let mut heap = KernelHeap::uninit();
 heap.init(&pages).unwrap();
 
 let object = heap.alloc(&mut pages, 100).unwrap();
-assert!(heap.usable_size(&pages, object).unwrap() >= 100);
-heap.free(&mut pages, object).unwrap();
+// SAFETY: both pointers are live allocations from this heap.
+assert!(unsafe { heap.usable_size(&pages, object) }.unwrap() >= 100);
+unsafe { heap.free(&mut pages, object) }.unwrap();
 
 // Larger requests bypass the slabs and use the page allocator directly.
 let block = heap.alloc_zeroed(&mut pages, 5000).unwrap();
-heap.free(&mut pages, block).unwrap();
+unsafe { heap.free(&mut pages, block) }.unwrap();
 
 heap.shrink(&mut pages).unwrap();
 heap.destroy(&mut pages).unwrap();

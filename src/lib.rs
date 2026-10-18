@@ -77,7 +77,8 @@
 //!
 //! let object = cache.alloc(&mut pages).unwrap();
 //! assert_eq!(object.as_ptr() as usize % 8, 0);
-//! cache.free(&mut pages, object).unwrap();
+//! // SAFETY: `object` came from this cache and is still live.
+//! unsafe { cache.free(&mut pages, object) }.unwrap();
 //! cache.destroy(&mut pages).unwrap();
 //! # }
 //! ```

@@ -15,6 +15,7 @@ use the_slab::DirectMap;
 use the_slab::Error;
 use the_slab::KernelHeap;
 use the_slab::ObjectCache;
+use the_slab::PageAlloc;
 use the_slab::Zone;
 
 const PAGE: usize = 0x1000;
@@ -54,6 +55,55 @@ impl Drop for Memory {
     }
 }
 
+// Test wrappers for the unsafe pointer contracts. The tests only pass live
+// allocations returned by the matching allocator.
+fn cache_free<PA: PageAlloc>(
+    cache: &mut ObjectCache,
+    pages: &mut PA,
+    ptr: NonNull<u8>,
+) -> Result<(), Error> {
+    // SAFETY: see above.
+    unsafe { cache.free(pages, ptr) }
+}
+
+fn heap_free<PA: PageAlloc>(
+    heap: &mut KernelHeap,
+    pages: &mut PA,
+    ptr: NonNull<u8>,
+) -> Result<(), Error> {
+    // SAFETY: see above.
+    unsafe { heap.free(pages, ptr) }
+}
+
+fn heap_usable<PA: PageAlloc>(
+    heap: &KernelHeap,
+    pages: &PA,
+    ptr: NonNull<u8>,
+) -> Result<usize, Error> {
+    // SAFETY: see above.
+    unsafe { heap.usable_size(pages, ptr) }
+}
+
+fn heap_realloc<PA: PageAlloc>(
+    heap: &mut KernelHeap,
+    pages: &mut PA,
+    ptr: NonNull<u8>,
+    new_size: usize,
+) -> Result<NonNull<u8>, Error> {
+    // SAFETY: see above.
+    unsafe { heap.realloc(pages, ptr, new_size) }
+}
+
+fn heap_realloc_layout<PA: PageAlloc>(
+    heap: &mut KernelHeap,
+    pages: &mut PA,
+    ptr: NonNull<u8>,
+    new_layout: Layout,
+) -> Result<NonNull<u8>, Error> {
+    // SAFETY: see above.
+    unsafe { heap.realloc_layout(pages, ptr, new_layout) }
+}
+
 #[test]
 fn slab_over_buddy_end_to_end() {
     let memory = Memory::new(PAGES);
@@ -90,11 +140,11 @@ fn slab_over_buddy_end_to_end() {
 
     // Free half, then the rest.
     for object in live.drain(..500) {
-        cache.free(&mut pages, object).unwrap();
+        cache_free(&mut cache, &mut pages, object).unwrap();
     }
     cache.validate(&pages).unwrap();
     for object in live {
-        cache.free(&mut pages, object).unwrap();
+        cache_free(&mut cache, &mut pages, object).unwrap();
     }
     assert_eq!(cache.nr_free_objects(), cache.nr_objects());
     cache.validate(&pages).unwrap();
@@ -141,7 +191,7 @@ fn boot_handoff_from_memblock_to_slab() {
         cache.validate(&pages).unwrap();
 
         for object in live {
-            cache.free(&mut pages, object).unwrap();
+            cache_free(&mut cache, &mut pages, object).unwrap();
         }
         cache.shrink(&mut pages).unwrap();
         assert_eq!(cache.nr_slabs(), 0);
@@ -184,7 +234,7 @@ fn heap_across_classes_roundtrip() {
         for &size in &[1usize, 8, 9, 64, 96, 100, 192, 256, 1024, 2048] {
             for round in 0..4u8 {
                 let object = heap.alloc(&mut pages, size).unwrap();
-                let usable = heap.usable_size(&pages, object).unwrap();
+                let usable = heap_usable(&heap, &pages, object).unwrap();
                 assert!(usable >= size);
                 // SAFETY: the object owns `usable` writable bytes.
                 unsafe { object.as_ptr().write_bytes(round, usable) };
@@ -199,7 +249,7 @@ fn heap_across_classes_roundtrip() {
         heap.validate(&pages).unwrap();
 
         for object in live {
-            heap.free(&mut pages, object).unwrap();
+            heap_free(&mut heap, &mut pages, object).unwrap();
         }
         heap.validate(&pages).unwrap();
 
@@ -235,13 +285,13 @@ fn heap_large_uses_the_page_allocator() {
 
         for size in [4096usize, 5000, 16384] {
             let object = heap.alloc(&mut pages, size).unwrap();
-            let usable = heap.usable_size(&pages, object).unwrap();
+            let usable = heap_usable(&heap, &pages, object).unwrap();
             assert!(usable >= size);
             assert!(object.as_ptr() as usize > base);
             assert!((object.as_ptr() as usize) < base + MEMORY_PAGES * PAGE);
             // SAFETY: the object owns `usable` writable bytes.
             unsafe { object.as_ptr().write_bytes(0xab, usable) };
-            heap.free(&mut pages, object).unwrap();
+            heap_free(&mut heap, &mut pages, object).unwrap();
         }
 
         heap.validate(&pages).unwrap();
@@ -270,24 +320,24 @@ fn heap_alloc_zeroed_and_realloc() {
 
         // Zeroing covers the whole usable allocation.
         let zeroed = heap.alloc_zeroed(&mut pages, 200).unwrap();
-        let usable = heap.usable_size(&pages, zeroed).unwrap();
+        let usable = heap_usable(&heap, &pages, zeroed).unwrap();
         // SAFETY: the object is allocated and readable.
         let bytes = unsafe { core::slice::from_raw_parts(zeroed.as_ptr(), usable) };
         assert!(bytes.iter().all(|byte| *byte == 0));
-        heap.free(&mut pages, zeroed).unwrap();
+        heap_free(&mut heap, &mut pages, zeroed).unwrap();
 
         // Growing copies the old bytes; shrinking keeps the pointer.
         let object = heap.alloc(&mut pages, 100).unwrap();
         // SAFETY: the object owns at least 100 writable bytes.
         unsafe { object.as_ptr().write_bytes(0x5a, 100) };
-        let grown = heap.realloc(&mut pages, object, 3000).unwrap();
-        assert!(heap.usable_size(&pages, grown).unwrap() >= 3000);
+        let grown = heap_realloc(&mut heap, &mut pages, object, 3000).unwrap();
+        assert!(heap_usable(&heap, &pages, grown).unwrap() >= 3000);
         // SAFETY: `realloc` copied the old contents.
         let copied = unsafe { core::slice::from_raw_parts(grown.as_ptr(), 100) };
         assert!(copied.iter().all(|byte| *byte == 0x5a));
-        let same = heap.realloc(&mut pages, grown, 64).unwrap();
+        let same = heap_realloc(&mut heap, &mut pages, grown, 64).unwrap();
         assert_eq!(same, grown);
-        heap.free(&mut pages, same).unwrap();
+        heap_free(&mut heap, &mut pages, same).unwrap();
 
         heap.validate(&pages).unwrap();
         heap.destroy(&mut pages).unwrap();
@@ -326,13 +376,13 @@ fn heap_allocations_are_naturally_aligned() {
         ] {
             let object = heap.alloc(&mut pages, size).unwrap();
             assert_eq!(object.as_ptr().addr() % align, 0, "size {size}");
-            heap.free(&mut pages, object).unwrap();
+            heap_free(&mut heap, &mut pages, object).unwrap();
         }
 
         // A request that rounds up to a larger class gets its alignment.
         let object = heap.alloc(&mut pages, 100).unwrap(); // class 128
         assert_eq!(object.as_ptr().addr() % 128, 0);
-        heap.free(&mut pages, object).unwrap();
+        heap_free(&mut heap, &mut pages, object).unwrap();
 
         heap.shrink(&mut pages).unwrap();
         heap.destroy(&mut pages).unwrap();
@@ -370,19 +420,19 @@ fn alloc_layout_honors_size_and_alignment() {
             let object = heap.alloc_layout(&mut pages, layout).unwrap();
             assert_eq!(object.as_ptr().addr() % align, 0, "{size}/{align}");
             assert_eq!(
-                heap.usable_size(&pages, object).unwrap(),
+                heap_usable(&heap, &pages, object).unwrap(),
                 class,
                 "{size}/{align}"
             );
-            heap.free(&mut pages, object).unwrap();
+            heap_free(&mut heap, &mut pages, object).unwrap();
         }
 
         // Requests larger than every class use the large path when the
         // alignment fits the tag's 8-byte boundary.
         let layout = Layout::from_size_align(10_000, 8).unwrap();
         let object = heap.alloc_layout(&mut pages, layout).unwrap();
-        assert!(heap.usable_size(&pages, object).unwrap() >= 10_000);
-        heap.free(&mut pages, object).unwrap();
+        assert!(heap_usable(&heap, &pages, object).unwrap() >= 10_000);
+        heap_free(&mut heap, &mut pages, object).unwrap();
 
         // Over-aligned requests that no class can serve are rejected:
         // class 4096 would need a multi-page slab on 4 KiB pages.
@@ -426,11 +476,11 @@ fn alloc_zeroed_layout_and_realloc_layout() {
         // Zeroing covers the usable allocation.
         let layout = Layout::from_size_align(100, 32).unwrap();
         let object = heap.alloc_zeroed_layout(&mut pages, layout).unwrap();
-        let usable = heap.usable_size(&pages, object).unwrap();
+        let usable = heap_usable(&heap, &pages, object).unwrap();
         // SAFETY: the object is allocated and readable.
         let bytes = unsafe { core::slice::from_raw_parts(object.as_ptr(), usable) };
         assert!(bytes.iter().all(|byte| *byte == 0));
-        heap.free(&mut pages, object).unwrap();
+        heap_free(&mut heap, &mut pages, object).unwrap();
 
         // A stronger alignment is honored, keeping the old contents.
         let small = heap
@@ -438,20 +488,28 @@ fn alloc_zeroed_layout_and_realloc_layout() {
             .unwrap();
         // SAFETY: the object owns at least 4 writable bytes.
         unsafe { small.as_ptr().write_bytes(0x5a, 4) };
-        let moved = heap
-            .realloc_layout(&mut pages, small, Layout::from_size_align(4, 64).unwrap())
-            .unwrap();
+        let moved = heap_realloc_layout(
+            &mut heap,
+            &mut pages,
+            small,
+            Layout::from_size_align(4, 64).unwrap(),
+        )
+        .unwrap();
         assert_eq!(moved.as_ptr().addr() % 64, 0);
         // SAFETY: `realloc_layout` copied the old contents.
         let copied = unsafe { core::slice::from_raw_parts(moved.as_ptr(), 4) };
         assert!(copied.iter().all(|byte| *byte == 0x5a));
 
         // A satisfied alignment keeps the pointer.
-        let same = heap
-            .realloc_layout(&mut pages, moved, Layout::from_size_align(2, 64).unwrap())
-            .unwrap();
+        let same = heap_realloc_layout(
+            &mut heap,
+            &mut pages,
+            moved,
+            Layout::from_size_align(2, 64).unwrap(),
+        )
+        .unwrap();
         assert_eq!(same, moved);
-        heap.free(&mut pages, same).unwrap();
+        heap_free(&mut heap, &mut pages, same).unwrap();
 
         heap.validate(&pages).unwrap();
         heap.destroy(&mut pages).unwrap();
@@ -482,7 +540,7 @@ fn free_rejects_bad_pointers() {
     // SAFETY: the arithmetic stays inside the object.
     let interior = unsafe { NonNull::new(object.as_ptr().add(8)).unwrap() };
     assert!(matches!(
-        heap.free(&mut pages, interior),
+        heap_free(&mut heap, &mut pages, interior),
         Err(Error::InvalidPointer)
     ));
 
@@ -490,7 +548,7 @@ fn free_rejects_bad_pointers() {
     // SAFETY: the arithmetic stays inside the backing allocation.
     let stray = unsafe { NonNull::new(memory.ptr.as_ptr().add(20 * PAGE)).unwrap() };
     assert!(matches!(
-        heap.free(&mut pages, stray),
+        heap_free(&mut heap, &mut pages, stray),
         Err(Error::InvalidPointer)
     ));
 
@@ -499,13 +557,13 @@ fn free_rejects_bad_pointers() {
     foreign.init(&pages, "foreign", 64, 8).unwrap();
     let foreign_object = foreign.alloc(&mut pages).unwrap();
     assert!(matches!(
-        heap.free(&mut pages, foreign_object),
+        heap_free(&mut heap, &mut pages, foreign_object),
         Err(Error::CrossCacheFree)
     ));
-    foreign.free(&mut pages, foreign_object).unwrap();
+    cache_free(&mut foreign, &mut pages, foreign_object).unwrap();
     foreign.destroy(&mut pages).unwrap();
 
-    heap.free(&mut pages, object).unwrap();
+    heap_free(&mut heap, &mut pages, object).unwrap();
     heap.shrink(&mut pages).unwrap();
     heap.destroy(&mut pages).unwrap();
 }
@@ -572,24 +630,21 @@ fn static_zone_object_cache_and_heap_share_the_page_allocator() {
         .alloc(&mut *ZONE.lock().unwrap(), 200)
         .unwrap();
     assert!(
-        STATIC_HEAP
-            .lock()
-            .unwrap()
-            .usable_size(&*ZONE.lock().unwrap(), block)
-            .unwrap()
-            >= 200
+        heap_usable(&STATIC_HEAP.lock().unwrap(), &*ZONE.lock().unwrap(), block).unwrap() >= 200
     );
 
-    CACHE
-        .lock()
-        .unwrap()
-        .free(&mut *ZONE.lock().unwrap(), object)
-        .unwrap();
-    STATIC_HEAP
-        .lock()
-        .unwrap()
-        .free(&mut *ZONE.lock().unwrap(), block)
-        .unwrap();
+    cache_free(
+        &mut CACHE.lock().unwrap(),
+        &mut *ZONE.lock().unwrap(),
+        object,
+    )
+    .unwrap();
+    heap_free(
+        &mut STATIC_HEAP.lock().unwrap(),
+        &mut *ZONE.lock().unwrap(),
+        block,
+    )
+    .unwrap();
 
     // Every empty slab goes back to the zone.
     let mut cache = CACHE.lock().unwrap();
@@ -651,7 +706,7 @@ fn heap_can_move_after_init() {
 
         // Move the initialized heap to a new location.
         let mut moved = Box::new(heap);
-        moved.free(&mut pages, object).unwrap();
+        heap_free(&mut moved, &mut pages, object).unwrap();
         (*moved).destroy(&mut pages).unwrap();
     }
 

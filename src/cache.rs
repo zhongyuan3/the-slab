@@ -356,6 +356,13 @@ impl ObjectCache {
     /// and the slab moves between the full, partial and empty states. An
     /// empty, non-active slab is returned to the page allocator.
     ///
+    /// # Safety
+    ///
+    /// `ptr` must be a pointer returned by [`ObjectCache::alloc`] or
+    /// [`ObjectCache::try_alloc_cached`] for this cache, must still be live,
+    /// and must remain readable and writable. The slab header and object
+    /// metadata are read through the page mapping.
+    ///
     /// # Errors
     ///
     /// [`Error::Uninitialized`] before [`ObjectCache::init`];
@@ -364,7 +371,11 @@ impl ObjectCache {
     /// [`Error::CrossCacheFree`] if the slab belongs to another cache;
     /// [`Error::DoubleFree`] if the object is already free;
     /// [`Error::PageAlloc`] if returning an empty slab fails.
-    pub fn free<PA: PageAlloc>(&mut self, pages: &mut PA, ptr: NonNull<u8>) -> Result<(), Error> {
+    pub unsafe fn free<PA: PageAlloc>(
+        &mut self,
+        pages: &mut PA,
+        ptr: NonNull<u8>,
+    ) -> Result<(), Error> {
         if !self.is_initialized() {
             return Err(Error::Uninitialized);
         }
@@ -953,6 +964,12 @@ mod tests {
         cache
     }
 
+    /// Test wrapper for the unsafe free contract.
+    fn free(cache: &mut ObjectCache, alloc: &mut TestAlloc, ptr: NonNull<u8>) -> Result<(), Error> {
+        // SAFETY: tests only free live objects returned by `cache`.
+        unsafe { cache.free(alloc, ptr) }
+    }
+
     fn alloc_many(
         cache: &mut ObjectCache,
         alloc: &mut TestAlloc,
@@ -970,7 +987,7 @@ mod tests {
 
         assert!(matches!(cache.alloc(&mut alloc), Err(Error::Uninitialized)));
         assert!(matches!(
-            cache.free(&mut alloc, NonNull::dangling()),
+            free(&mut cache, &mut alloc, NonNull::dangling()),
             Err(Error::Uninitialized)
         ));
         assert!(matches!(cache.shrink(&mut alloc), Err(Error::Uninitialized)));
@@ -1040,9 +1057,9 @@ mod tests {
         cache.validate(&alloc).unwrap();
 
         for object in objects {
-            cache.free(&mut alloc, object).unwrap();
+            free(&mut cache, &mut alloc, object).unwrap();
         }
-        cache.free(&mut alloc, extra).unwrap();
+        free(&mut cache, &mut alloc, extra).unwrap();
         assert_eq!(cache.nr_free_objects(), 2 * per_slab);
         cache.validate(&alloc).unwrap();
     }
@@ -1078,14 +1095,14 @@ mod tests {
         // Misaligned pointer inside the object area.
         let misaligned = NonNull::new(object.as_ptr().wrapping_add(1)).unwrap();
         assert!(matches!(
-            cache.free(&mut alloc, misaligned),
+            free(&mut cache, &mut alloc, misaligned),
             Err(Error::InvalidPointer)
         ));
 
         // Pointer into the header area of a valid slab.
         let header_slot = unsafe { alloc.ptr_at(alloc.page_of(object)).add(8) };
         assert!(matches!(
-            cache.free(&mut alloc, header_slot),
+            free(&mut cache, &mut alloc, header_slot),
             Err(Error::InvalidPointer)
         ));
 
@@ -1093,7 +1110,7 @@ mod tests {
         // magic check.
         let stray = alloc.ptr_at(32);
         assert!(matches!(
-            cache.free(&mut alloc, stray),
+            free(&mut cache, &mut alloc, stray),
             Err(Error::InvalidPointer)
         ));
 
@@ -1102,7 +1119,7 @@ mod tests {
         let below_base = alloc.base.as_ptr().addr().checked_sub(1).unwrap();
         let below = NonNull::new(below_base as *mut u8).unwrap();
         assert!(matches!(
-            cache.free(&mut alloc, below),
+            free(&mut cache, &mut alloc, below),
             Err(Error::InvalidPointer)
         ));
 
@@ -1110,15 +1127,15 @@ mod tests {
         let mut other = cache_with(&alloc, 24, 8);
         let other_object = other.alloc(&mut alloc).unwrap();
         assert!(matches!(
-            cache.free(&mut alloc, other_object),
+            free(&mut cache, &mut alloc, other_object),
             Err(Error::CrossCacheFree)
         ));
-        other.free(&mut alloc, other_object).unwrap();
+        free(&mut other, &mut alloc, other_object).unwrap();
 
         // Immediate double free.
-        cache.free(&mut alloc, object).unwrap();
+        free(&mut cache, &mut alloc, object).unwrap();
         assert!(matches!(
-            cache.free(&mut alloc, object),
+            free(&mut cache, &mut alloc, object),
             Err(Error::DoubleFree)
         ));
     }
@@ -1132,7 +1149,7 @@ mod tests {
         // The id is captured at init and stored in both the cache and the
         // slab header, so moving the initialized cache must not break free.
         let mut moved = Box::new(cache);
-        moved.free(&mut alloc, object).unwrap();
+        free(&mut moved, &mut alloc, object).unwrap();
         assert_eq!(moved.nr_free_objects(), moved.nr_objects());
         (*moved).destroy(&mut alloc).unwrap();
     }
@@ -1152,7 +1169,7 @@ mod tests {
 
         // Free one object of the forgotten, full first slab: it becomes
         // partial and is linked into the partial list.
-        cache.free(&mut alloc, first_objects[0]).unwrap();
+        free(&mut cache, &mut alloc, first_objects[0]).unwrap();
 
         // Exhaust the second slab; the refill must reuse slab A.
         for _ in 1..per_slab {
@@ -1175,7 +1192,7 @@ mod tests {
         assert_eq!(alloc.allocated_pages(), 2);
 
         for object in objects {
-            cache.free(&mut alloc, object).unwrap();
+            free(&mut cache, &mut alloc, object).unwrap();
         }
         // Both slabs are empty: the active one is kept, the other is kept
         // on the partial list within `min_partial`.
@@ -1200,7 +1217,7 @@ mod tests {
 
         let objects = alloc_many(&mut cache, &mut alloc, 2 * per_slab);
         for object in objects {
-            cache.free(&mut alloc, object).unwrap();
+            free(&mut cache, &mut alloc, object).unwrap();
         }
 
         // With `min_partial` zero the emptied partial slab goes back to
@@ -1226,7 +1243,7 @@ mod tests {
 
         // The first slab was full, is now empty and linked nowhere: it is
         // released immediately, together with the object just freed.
-        cache.free(&mut alloc, first).unwrap();
+        free(&mut cache, &mut alloc, first).unwrap();
         assert_eq!(cache.nr_slabs(), 1);
         assert_eq!(alloc.allocated_pages(), 1);
         assert_eq!(cache.nr_objects(), 1);
@@ -1248,8 +1265,8 @@ mod tests {
         let bytes = unsafe { core::slice::from_raw_parts(zeroed.as_ptr(), 24) };
         assert!(bytes.iter().all(|byte| *byte == 0));
 
-        cache.free(&mut alloc, first).unwrap();
-        cache.free(&mut alloc, zeroed).unwrap();
+        free(&mut cache, &mut alloc, first).unwrap();
+        free(&mut cache, &mut alloc, zeroed).unwrap();
         cache.validate(&alloc).unwrap();
     }
 
@@ -1262,7 +1279,7 @@ mod tests {
         let objects = alloc_many(&mut cache, &mut alloc, count);
         assert_eq!(cache.nr_slabs(), 3);
         for object in objects {
-            cache.free(&mut alloc, object).unwrap();
+            free(&mut cache, &mut alloc, object).unwrap();
         }
 
         cache.destroy(&mut alloc).unwrap();
@@ -1316,7 +1333,7 @@ mod tests {
                 );
             }
             for object in objects {
-                cache.free(&mut alloc, object).unwrap();
+                free(&mut cache, &mut alloc, object).unwrap();
             }
             cache.shrink(&mut alloc).unwrap();
             assert_eq!(cache.nr_slabs(), 0);
@@ -1342,7 +1359,7 @@ mod tests {
             if rand() % 3 != 0 && !live.is_empty() {
                 let index = (rand() as usize) % live.len();
                 let object = live.swap_remove(index);
-                cache.free(&mut alloc, object).unwrap();
+                free(&mut cache, &mut alloc, object).unwrap();
             } else if let Ok(object) = cache.alloc(&mut alloc) {
                 live.push(object);
             }
@@ -1352,7 +1369,7 @@ mod tests {
         }
 
         for object in live {
-            cache.free(&mut alloc, object).unwrap();
+            free(&mut cache, &mut alloc, object).unwrap();
         }
         cache.validate(&alloc).unwrap();
         cache.shrink(&mut alloc).unwrap();

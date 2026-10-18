@@ -246,7 +246,8 @@ impl KernelHeap {
         size: usize,
     ) -> Result<NonNull<u8>, Error> {
         let object = self.alloc(pages, size)?;
-        let usable = self.usable_size(pages, object)?;
+        // SAFETY: `object` was just returned by `alloc`.
+        let usable = unsafe { self.usable_size(pages, object)? };
         // SAFETY: the allocation owns `usable` writable bytes.
         unsafe { object.as_ptr().write_bytes(0, usable) };
         Ok(object)
@@ -301,7 +302,8 @@ impl KernelHeap {
         layout: Layout,
     ) -> Result<NonNull<u8>, Error> {
         let object = self.alloc_layout(pages, layout)?;
-        let usable = self.usable_size(pages, object)?;
+        // SAFETY: `object` was just returned by `alloc_layout`.
+        let usable = unsafe { self.usable_size(pages, object)? };
         // SAFETY: the allocation owns `usable` writable bytes.
         unsafe { object.as_ptr().write_bytes(0, usable) };
         Ok(object)
@@ -312,11 +314,16 @@ impl KernelHeap {
     /// Like [`KernelHeap::realloc`], but the block is also moved when the
     /// current pointer does not satisfy `new_layout.align()`.
     ///
+    /// # Safety
+    ///
+    /// `ptr` must be a live allocation returned by this heap's allocation
+    /// methods, and `new_layout` must describe a valid size and alignment.
+    ///
     /// # Errors
     ///
     /// Same as [`KernelHeap::alloc_layout`] and
     /// [`KernelHeap::usable_size`].
-    pub fn realloc_layout<PA: PageAlloc>(
+    pub unsafe fn realloc_layout<PA: PageAlloc>(
         &mut self,
         pages: &mut PA,
         ptr: NonNull<u8>,
@@ -329,7 +336,8 @@ impl KernelHeap {
             return Err(Error::InvalidObjectSize);
         }
 
-        let old_size = self.usable_size(pages, ptr)?;
+        // SAFETY: the caller guarantees `ptr` is a live allocation.
+        let old_size = unsafe { self.usable_size(pages, ptr)? };
         if new_layout.size() <= old_size && ptr.as_ptr().addr() % new_layout.align() == 0 {
             return Ok(ptr);
         }
@@ -344,7 +352,8 @@ impl KernelHeap {
                 old_size.min(new_layout.size()),
             );
         }
-        self.free(pages, ptr)?;
+        // SAFETY: the caller guarantees `ptr` is a live allocation.
+        unsafe { self.free(pages, ptr)? };
         Ok(new)
     }
 
@@ -354,6 +363,11 @@ impl KernelHeap {
     /// Mirrors `kfree`: the pointer's page carries either a slab header or
     /// a large tag, which identifies the owning cache or the block order.
     ///
+    /// # Safety
+    ///
+    /// `ptr` must be a live allocation returned by this heap's allocation
+    /// methods and must not have been freed.
+    ///
     /// # Errors
     ///
     /// [`Error::Uninitialized`] before [`KernelHeap::init`],
@@ -361,7 +375,11 @@ impl KernelHeap {
     /// tag (interior or stray pointers), [`Error::CrossCacheFree`] for an
     /// object of a cache that is not part of this set, or the slab's or
     /// page allocator's error.
-    pub fn free<PA: PageAlloc>(&mut self, pages: &mut PA, ptr: NonNull<u8>) -> Result<(), Error> {
+    pub unsafe fn free<PA: PageAlloc>(
+        &mut self,
+        pages: &mut PA,
+        ptr: NonNull<u8>,
+    ) -> Result<(), Error> {
         if !self.initialized {
             return Err(Error::Uninitialized);
         }
@@ -373,7 +391,9 @@ impl KernelHeap {
                 // slab header.
                 let owner = unsafe { (*page.cast::<SlabHeader>().as_ptr()).owner };
                 let index = self.cache_index(owner).ok_or(Error::CrossCacheFree)?;
-                self.caches[index].free(pages, ptr)
+                // SAFETY: `ptr` is a live allocation and the header matched
+                // this cache's id.
+                unsafe { self.caches[index].free(pages, ptr) }
             }
             LARGE_MAGIC => {
                 // SAFETY: the magic matched, so the page starts with a
@@ -396,12 +416,21 @@ impl KernelHeap {
     ///
     /// Mirrors `ksize`/`__ksize`.
     ///
+    /// # Safety
+    ///
+    /// `ptr` must be a live allocation returned by this heap's allocation
+    /// methods.
+    ///
     /// # Errors
     ///
     /// [`Error::Uninitialized`] before [`KernelHeap::init`],
     /// [`Error::InvalidPointer`] or [`Error::CrossCacheFree`] for pointers
     /// that do not belong to this set.
-    pub fn usable_size<PA: PageAlloc>(&self, pages: &PA, ptr: NonNull<u8>) -> Result<usize, Error> {
+    pub unsafe fn usable_size<PA: PageAlloc>(
+        &self,
+        pages: &PA,
+        ptr: NonNull<u8>,
+    ) -> Result<usize, Error> {
         if !self.initialized {
             return Err(Error::Uninitialized);
         }
@@ -439,10 +468,15 @@ impl KernelHeap {
     /// null pointer is the caller's `kmalloc`, and `new_size` must be
     /// non-zero.
     ///
+    /// # Safety
+    ///
+    /// `ptr` must be a live allocation returned by this heap's allocation
+    /// methods, and `new_size` must be non-zero.
+    ///
     /// # Errors
     ///
     /// Same as [`KernelHeap::alloc`] and [`KernelHeap::usable_size`].
-    pub fn realloc<PA: PageAlloc>(
+    pub unsafe fn realloc<PA: PageAlloc>(
         &mut self,
         pages: &mut PA,
         ptr: NonNull<u8>,
@@ -455,7 +489,8 @@ impl KernelHeap {
             return Err(Error::InvalidObjectSize);
         }
 
-        let old_size = self.usable_size(pages, ptr)?;
+        // SAFETY: the caller guarantees `ptr` is a live allocation.
+        let old_size = unsafe { self.usable_size(pages, ptr)? };
         if new_size <= old_size {
             return Ok(ptr);
         }
@@ -466,7 +501,8 @@ impl KernelHeap {
         unsafe {
             core::ptr::copy_nonoverlapping(ptr.as_ptr(), new.as_ptr(), old_size.min(new_size));
         }
-        self.free(pages, ptr)?;
+        // SAFETY: the caller guarantees `ptr` is a live allocation.
+        unsafe { self.free(pages, ptr)? };
         Ok(new)
     }
 
