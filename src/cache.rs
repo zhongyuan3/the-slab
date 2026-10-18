@@ -108,7 +108,10 @@ pub struct ObjectCache {
     current: Option<NonNull<SlabHeader>>,
     /// Head of the doubly linked partial list.
     partial: Option<NonNull<SlabHeader>>,
+    /// Head of the doubly linked full list.
+    full: Option<NonNull<SlabHeader>>,
     nr_partial: usize,
+    nr_full: usize,
     min_partial: usize,
     nr_slabs: usize,
     nr_objects: usize,
@@ -135,7 +138,9 @@ impl ObjectCache {
             layout: SlabLayout::EMPTY,
             current: None,
             partial: None,
+            full: None,
             nr_partial: 0,
+            nr_full: 0,
             min_partial: DEFAULT_MIN_PARTIAL,
             nr_slabs: 0,
             nr_objects: 0,
@@ -255,7 +260,9 @@ impl ObjectCache {
         self.layout = layout;
         self.current = None;
         self.partial = None;
+        self.full = None;
         self.nr_partial = 0;
+        self.nr_full = 0;
         self.nr_slabs = 0;
         self.nr_objects = 0;
         self.nr_free_objects = 0;
@@ -361,8 +368,7 @@ impl ObjectCache {
     /// `ptr` must be a pointer returned by [`ObjectCache::alloc`] or
     /// [`ObjectCache::try_alloc_cached`] for this cache, must still be live,
     /// and must remain readable and writable. The slab header and object
-    /// metadata are read through the page mapping, which must be readable
-    /// and initialized.
+    /// metadata are read through the page mapping.
     ///
     /// # Errors
     ///
@@ -394,7 +400,7 @@ impl ObjectCache {
         // valid, aligned location. It is either a live slab of some cache
         // or arbitrary (initialized) memory; the magic and owner checks
         // reject the latter before anything is mutated.
-        let (inuse, objects, on_partial) = unsafe {
+        let (inuse, objects, on_partial, on_full) = unsafe {
             let header = &mut *slab.as_ptr();
             if header.magic != SLAB_MAGIC {
                 return Err(Error::InvalidPointer);
@@ -429,7 +435,12 @@ impl ObjectCache {
             set_freepointer(ptr, header.freelist);
             header.freelist = Some(ptr);
             header.inuse -= 1;
-            (header.inuse, header.objects, header.on_partial)
+            (
+                header.inuse,
+                header.objects,
+                header.on_partial,
+                header.on_full,
+            )
         };
         self.nr_free_objects += 1;
 
@@ -441,13 +452,21 @@ impl ObjectCache {
                     self.unlink_partial(slab);
                     self.release_slab(pages, slab)?;
                 }
+            } else if on_full {
+                self.unlink_full(slab);
+                self.release_slab(pages, slab)?;
             } else {
-                // The slab was full and is now empty; nothing links to it.
                 self.release_slab(pages, slab)?;
             }
-        } else if inuse < objects && !on_partial && self.current != Some(slab) {
-            // The slab was full and is now partial.
-            self.push_partial(slab);
+        } else if inuse < objects {
+            if self.current == Some(slab) {
+                // The active slab stays active.
+            } else if on_full {
+                self.unlink_full(slab);
+                self.push_partial(slab);
+            } else if !on_partial {
+                self.push_partial(slab);
+            }
         }
 
         Ok(())
@@ -492,8 +511,7 @@ impl ObjectCache {
     /// Releases every slab and consumes the cache.
     ///
     /// Mirrors `kmem_cache_destroy`. All objects must have been freed
-    /// first; slabs holding live objects are not reachable through the
-    /// partial list and keep their pages.
+    /// first; the active, partial and full lists are all released.
     pub fn destroy<PA: PageAlloc>(mut self, pages: &mut PA) -> Result<(), Error> {
         if !self.is_initialized() {
             return Err(Error::Uninitialized);
@@ -506,18 +524,20 @@ impl ObjectCache {
             self.unlink_partial(slab);
             self.release_slab(pages, slab)?;
         }
+        while let Some(slab) = self.pop_full() {
+            self.release_slab(pages, slab)?;
+        }
 
         Ok(())
     }
 
     /// Verifies the cache's invariants.
     ///
-    /// Checks every walkable slab (the active one and the partial list):
-    /// header magic, owner and layout, in-use accounting, the object free
-    /// list (bounded, aligned, inside the object area) and the partial
-    /// list links. Full slabs cannot be enumerated, exactly as in SLUB, so
-    /// only the free object count is cross-checked against the
-    /// bookkeeping.
+    /// Checks every slab (the active one, the partial list and the full
+    /// list): header magic, owner and layout, in-use accounting, the object
+    /// free list (bounded, aligned, inside the object area), the list links
+    /// and the full-slab state. Also cross-checks the slab counts and the
+    /// free object count.
     ///
     /// Mirrors `check_object` and `validate_slab_cache`.
     ///
@@ -531,14 +551,19 @@ impl ObjectCache {
         }
 
         let mut free_total = 0usize;
+        let mut total = 0usize;
 
         if let Some(current) = self.current {
             // SAFETY: `current` is owned by this cache.
-            let on_partial = unsafe { (*current.as_ptr()).on_partial };
-            if on_partial {
+            let (on_partial, on_full) = unsafe {
+                let header = &*current.as_ptr();
+                (header.on_partial, header.on_full)
+            };
+            if on_partial || on_full {
                 return Err(Error::CorruptSlab);
             }
             free_total += self.validate_slab(map, current)?;
+            total += 1;
         }
 
         let mut node = self.partial;
@@ -546,11 +571,11 @@ impl ObjectCache {
         let mut prev: Option<NonNull<SlabHeader>> = None;
         while let Some(slab) = node {
             // SAFETY: partial list nodes are owned slabs.
-            let (next, on_partial, back) = unsafe {
+            let (next, on_partial, on_full, back) = unsafe {
                 let header = &*slab.as_ptr();
-                (header.next, header.on_partial, header.prev)
+                (header.next, header.on_partial, header.on_full, header.prev)
             };
-            if !on_partial || back != prev {
+            if !on_partial || on_full || back != prev {
                 return Err(Error::CorruptSlab);
             }
             free_total += self.validate_slab(map, slab)?;
@@ -561,8 +586,44 @@ impl ObjectCache {
             prev = node;
             node = next;
         }
-
         if len != self.nr_partial {
+            return Err(Error::CountMismatch);
+        }
+        total += len;
+
+        let mut node = self.full;
+        let mut len = 0usize;
+        let mut prev: Option<NonNull<SlabHeader>> = None;
+        while let Some(slab) = node {
+            // SAFETY: full list nodes are owned slabs.
+            let (next, on_partial, on_full, back, inuse, objects) = unsafe {
+                let header = &*slab.as_ptr();
+                (
+                    header.next,
+                    header.on_partial,
+                    header.on_full,
+                    header.prev,
+                    header.inuse,
+                    header.objects,
+                )
+            };
+            if on_partial || !on_full || back != prev || inuse != objects {
+                return Err(Error::CorruptSlab);
+            }
+            free_total += self.validate_slab(map, slab)?;
+            len += 1;
+            if len > self.nr_slabs {
+                return Err(Error::CorruptSlab);
+            }
+            prev = node;
+            node = next;
+        }
+        if len != self.nr_full {
+            return Err(Error::CountMismatch);
+        }
+        total += len;
+
+        if total != self.nr_slabs {
             return Err(Error::CountMismatch);
         }
         if free_total != self.nr_free_objects {
@@ -660,8 +721,11 @@ impl ObjectCache {
             }
         } else if inuse < objects {
             self.push_partial(current);
+        } else {
+            // Keep full slabs reachable so `KernelHeap` can locate an
+            // object from its pointer and `destroy` can release them.
+            self.push_full(current);
         }
-        // A full slab is forgotten: `free` finds it through its objects.
         Ok(())
     }
 
@@ -685,6 +749,7 @@ impl ObjectCache {
             header.magic = SLAB_MAGIC;
             header.order = self.layout.order();
             header.on_partial = false;
+            header.on_full = false;
             header.inuse = 0;
             header.objects = self.layout.objects();
             header.freelist = None;
@@ -789,6 +854,106 @@ impl ObjectCache {
             header.prev = None;
         }
         self.nr_partial -= 1;
+    }
+
+    /// Pushes a full slab at the front of the full list.
+    fn push_full(&mut self, slab: NonNull<SlabHeader>) {
+        // SAFETY: `slab` is owned by this cache and not linked anywhere.
+        unsafe {
+            let header = &mut *slab.as_ptr();
+            debug_assert!(!header.on_partial && !header.on_full);
+            header.on_full = true;
+            header.prev = None;
+            header.next = self.full;
+            if let Some(head) = self.full {
+                (*head.as_ptr()).prev = Some(slab);
+            }
+        }
+        self.full = Some(slab);
+        self.nr_full += 1;
+    }
+
+    /// Pops the front slab of the full list.
+    fn pop_full(&mut self) -> Option<NonNull<SlabHeader>> {
+        let slab = self.full?;
+
+        // SAFETY: `slab` is the head of the full list.
+        unsafe {
+            let header = &mut *slab.as_ptr();
+            self.full = header.next;
+            header.on_full = false;
+            header.next = None;
+            header.prev = None;
+            if let Some(next) = self.full {
+                (*next.as_ptr()).prev = None;
+            }
+        }
+        self.nr_full -= 1;
+        Some(slab)
+    }
+
+    /// Unlinks a slab from the full list.
+    fn unlink_full(&mut self, slab: NonNull<SlabHeader>) {
+        // SAFETY: `slab` is linked into the full list.
+        unsafe {
+            let header = &mut *slab.as_ptr();
+            debug_assert!(header.on_full);
+
+            match (header.prev, header.next) {
+                (None, None) => self.full = None,
+                (None, Some(next)) => {
+                    (*next.as_ptr()).prev = None;
+                    self.full = Some(next);
+                }
+                (Some(prev), None) => {
+                    (*prev.as_ptr()).next = None;
+                }
+                (Some(prev), Some(next)) => {
+                    (*prev.as_ptr()).next = Some(next);
+                    (*next.as_ptr()).prev = Some(prev);
+                }
+            }
+
+            header.on_full = false;
+            header.next = None;
+            header.prev = None;
+        }
+        self.nr_full -= 1;
+    }
+
+    /// Iterates every slab owned by this cache: the active slab, the
+    /// partial list and the full list.
+    ///
+    /// The returned pointers are valid slab headers; the iterator is used
+    /// by [`KernelHeap`](crate::heap::KernelHeap) to locate the slab behind
+    /// an object pointer without scanning arbitrary memory.
+    pub(crate) fn slabs(&self) -> impl Iterator<Item = NonNull<SlabHeader>> + '_ {
+        self.current
+            .into_iter()
+            .chain(SlabListIter::new(self.partial))
+            .chain(SlabListIter::new(self.full))
+    }
+}
+
+/// Iterates a slab list through the `next` links in [`SlabHeader`].
+struct SlabListIter {
+    next: Option<NonNull<SlabHeader>>,
+}
+
+impl SlabListIter {
+    fn new(head: Option<NonNull<SlabHeader>>) -> Self {
+        Self { next: head }
+    }
+}
+
+impl Iterator for SlabListIter {
+    type Item = NonNull<SlabHeader>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let current = self.next?;
+        // SAFETY: list nodes are live slabs owned by the cache.
+        self.next = unsafe { (*current.as_ptr()).next };
+        Some(current)
     }
 }
 
@@ -1153,6 +1318,24 @@ mod tests {
         free(&mut moved, &mut alloc, object).unwrap();
         assert_eq!(moved.nr_free_objects(), moved.nr_objects());
         (*moved).destroy(&mut alloc).unwrap();
+    }
+
+    #[test]
+    fn destroy_releases_full_slabs() {
+        let mut alloc = TestAlloc::new();
+        let mut cache = cache_with(&alloc, 24, 8);
+        let per_slab = cache.layout().objects();
+
+        // Fill multiple slabs so at least one is on the full list and one is
+        // still active/partial.
+        let _objects = alloc_many(&mut cache, &mut alloc, per_slab * 2 + 1);
+        assert!(cache.nr_slabs() >= 3);
+        cache.validate(&alloc).unwrap();
+
+        // `destroy` consumes the cache; the full slabs must be reachable and
+        // released too.
+        cache.destroy(&mut alloc).unwrap();
+        assert_eq!(alloc.allocated_pages(), 0);
     }
 
     #[test]

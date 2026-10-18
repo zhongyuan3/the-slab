@@ -13,11 +13,11 @@ pub(crate) const SLAB_MAGIC: u32 = 0x5AB0_9001;
 /// The kernel overlays `struct slab` on `struct page`; without a vmemmap
 /// this crate stores the metadata at the start of the block itself,
 /// followed by the objects. The header keeps the free list head, the
-/// in-use count, the identity of the owning cache and the partial list
-/// links.
+/// in-use count, the identity of the owning cache, and the partial/full
+/// list links.
 ///
 /// `magic` is deliberately the first field: `KernelHeap::free` reads
-/// the first word of the page containing a pointer to tell a slab block
+/// the first word of a page containing a pointer to tell a slab block
 /// (this header) from a large allocation tag, so the two tag layouts must
 /// start with the same magic field.
 #[repr(C)]
@@ -29,6 +29,8 @@ pub(crate) struct SlabHeader {
     pub(crate) order: u8,
     /// `true` while the slab is linked into the cache's partial list.
     pub(crate) on_partial: bool,
+    /// `true` while the slab is linked into the cache's full list.
+    pub(crate) on_full: bool,
     /// Identity of the owning cache; lets `free` reject pointers passed to
     /// the wrong cache or to a cache that is not part of the kernel heap.
     pub(crate) owner: CacheId,

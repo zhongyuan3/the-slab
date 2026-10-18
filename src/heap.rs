@@ -15,10 +15,10 @@
 //!
 //! `free` has to find the slab or block behind a pointer without being
 //! told the cache. Large blocks carry their tag at the page-aligned base.
-//! For slabs, `free` first checks whether the page base is the slab header
-//! (the common one-page case), then tries each active cache's block
-//! alignment to locate the header of a multi-page slab. This keeps pointer
-//! inference working for both single-page and multi-page classes.
+//! For slabs, `free` walks each active cache's slab lists (active, partial
+//! and full) and checks which slab block contains the pointer. This keeps
+//! pointer inference working for both single-page and multi-page classes
+//! without scanning arbitrary memory.
 
 use core::alloc::Layout;
 use core::mem::size_of;
@@ -31,7 +31,6 @@ use crate::cache::CacheId;
 use crate::cache::ObjectCache;
 use crate::error::Error;
 use crate::header::SLAB_MAGIC;
-use crate::header::SlabHeader;
 use crate::pages::PageAlloc;
 use crate::pages::PhysMap;
 
@@ -115,8 +114,9 @@ enum Located<A> {
 /// allocator; locking stays with the caller.
 ///
 /// Size classes may use multi-page slab blocks. `free` and `usable_size`
-/// locate the owning allocation from the pointer by checking the large-block
-/// tag and the active caches' block alignments; no side table is needed.
+/// locate the owning allocation from the pointer by walking the active
+/// caches' slab lists (including full slabs) and checking the block range,
+/// then the large-block tag; no side table is needed.
 #[derive(Debug)]
 pub struct KernelHeap {
     caches: [ObjectCache; CLASS_COUNT],
@@ -384,8 +384,7 @@ impl KernelHeap {
     /// # Safety
     ///
     /// `ptr` must be a live allocation returned by this heap's allocation
-    /// methods and must not have been freed. The mapped allocator memory
-    /// around the allocation must be readable and initialized.
+    /// methods and must not have been freed.
     ///
     /// # Errors
     ///
@@ -422,8 +421,7 @@ impl KernelHeap {
     /// # Safety
     ///
     /// `ptr` must be a live allocation returned by this heap's allocation
-    /// methods. The mapped allocator memory around the allocation must be
-    /// readable and initialized.
+    /// methods.
     ///
     /// # Errors
     ///
@@ -571,11 +569,11 @@ impl KernelHeap {
 
     /// Locates the allocation behind `ptr`.
     ///
-    /// Large allocations are recognized by the tag at the page-aligned block
-    /// base. Slab objects are recognized by finding the active cache whose
-    /// block alignment produces a valid slab header owned by that cache;
-    /// this supports multi-page slabs where the object is not in the first
-    /// page.
+    /// Slab objects are found by walking each active cache's slab lists
+    /// (active, partial and full) and checking which slab block contains the
+    /// physical address. This supports multi-page slabs without reading
+    /// untrusted memory or relying on the page base. Large allocations are
+    /// recognized by the tag at the page-aligned block base.
     ///
     /// The caller must uphold the live-allocation contract of
     /// [`KernelHeap::free`].
@@ -585,38 +583,7 @@ impl KernelHeap {
         ptr: NonNull<u8>,
     ) -> Result<Located<PA::Addr>, Error> {
         let phys = pages.try_virt_to_phys(ptr).ok_or(Error::InvalidPointer)?;
-        let page_size = PA::Addr::try_from_usize(self.page_size).ok_or(Error::InternalError)?;
-        let page_phys = PA::Addr::align_down(phys, page_size);
-        let page = pages
-            .try_phys_to_virt(page_phys)
-            .ok_or(Error::InvalidPointer)?;
 
-        // SAFETY: `page` is page aligned and within the mapping. The
-        // caller's live-allocation contract makes the surrounding allocator
-        // memory readable.
-        let magic = unsafe { page.cast::<u32>().read() };
-
-        // Fast path: the object is in the first page of a slab, so the page
-        // base carries the slab header.
-        if magic == SLAB_MAGIC {
-            // SAFETY: the magic matched; the page starts with a slab header.
-            let header = unsafe { &*page.cast::<SlabHeader>().as_ptr() };
-            if let Some(index) = self.cache_index(header.owner) {
-                let cache = &self.caches[index];
-                if header.order == cache.layout().order() {
-                    if let Some(slab_bytes) = PA::Addr::try_from_usize(cache.layout().slab_bytes())
-                    {
-                        if PA::Addr::align_down(phys, slab_bytes) == page_phys {
-                            return Ok(Located::Slab { index });
-                        }
-                    }
-                }
-            }
-        }
-
-        // Multi-page slabs: try each active cache's block alignment. The
-        // object may be in any page of the block, so the page base is not
-        // necessarily the slab header.
         for (index, cache) in self.caches.iter().enumerate() {
             if !self.active[index] {
                 continue;
@@ -624,24 +591,27 @@ impl KernelHeap {
             let Some(slab_bytes) = PA::Addr::try_from_usize(cache.layout().slab_bytes()) else {
                 continue;
             };
-            let base = PA::Addr::align_down(phys, slab_bytes);
-            let Some(slab) = pages.try_phys_to_virt(base) else {
-                continue;
-            };
-            // SAFETY: the caller guarantees `ptr` is a live allocation; the
-            // aligned block base is allocator memory.
-            let header = unsafe { &*slab.cast::<SlabHeader>().as_ptr() };
-            if header.magic == SLAB_MAGIC
-                && header.owner == cache.id()
-                && header.order == cache.layout().order()
-            {
-                return Ok(Located::Slab { index });
+            for slab in cache.slabs() {
+                let Some(base) = pages.try_virt_to_phys(slab.cast()) else {
+                    continue;
+                };
+                if phys >= base && phys - base < slab_bytes {
+                    return Ok(Located::Slab { index });
+                }
             }
         }
 
-        // Large allocations carry their tag at the page-aligned block base.
-        // Check this after the slab scan so that object data in a later page
-        // of a multi-page slab cannot be mistaken for a large tag.
+        // No slab matched: a large allocation carries its tag at the
+        // page-aligned block base.
+        let page_size = PA::Addr::try_from_usize(self.page_size).ok_or(Error::InternalError)?;
+        let page_phys = PA::Addr::align_down(phys, page_size);
+        let page = pages
+            .try_phys_to_virt(page_phys)
+            .ok_or(Error::InvalidPointer)?;
+        // SAFETY: `page` is page aligned and within the mapping. A live
+        // large allocation has its tag there.
+        let magic = unsafe { page.cast::<u32>().read() };
+
         if magic == LARGE_MAGIC {
             // SAFETY: the magic matched; read the tag from the block base.
             let (order, expected) = unsafe {
@@ -659,19 +629,12 @@ impl KernelHeap {
             Err(Error::InvalidPointer)
         }
     }
-
-    /// Returns the index of the active cache whose id matches `owner`.
-    fn cache_index(&self, owner: CacheId) -> Option<usize> {
-        self.caches
-            .iter()
-            .enumerate()
-            .find_map(|(index, cache)| (self.active[index] && cache.id() == owner).then_some(index))
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::header::SlabHeader;
 
     #[test]
     fn class_index_picks_the_smallest_class() {

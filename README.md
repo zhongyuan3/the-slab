@@ -125,12 +125,11 @@ heap.shrink(&mut pages).unwrap();
 heap.destroy(&mut pages).unwrap();
 ```
 
-A kmalloc class may use a multi-page slab block. `free` first checks the
-page-aligned large tag, then the page-base slab header, and finally each
-active cache's block alignment, so it finds the owning cache even when the
-object is not in the first page of a multi-page slab. Requests beyond the
-largest class use the large path, where a tag at the page-aligned base of
-the block records the allocation order.
+A kmalloc class may use a multi-page slab block. `free` walks the active
+caches' slab lists (active, partial and full) and checks which slab block
+contains the pointer, then falls back to the tag at the page-aligned base of
+a large block. Requests beyond the largest class use the large path, where a
+tag at the page-aligned base of the block records the allocation order.
 
 Allocations carry the kernel's natural alignment: a power-of-two class
 returns that alignment and the intermediates at least their lowbit (96 →

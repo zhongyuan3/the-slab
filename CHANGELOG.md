@@ -56,11 +56,13 @@ All notable changes to this project are documented in this file.
   `memblock` feature, so memblock and buddy stay fully decoupled.
 - **Multi-page kmalloc classes.** `KernelHeap::init` now activates size
   classes whose layout needs a multi-page slab block (for example
-  `kmalloc-4096` and `kmalloc-8192` on 4 KiB pages). `free` and
-  `usable_size` locate the owning allocation by checking the page-aligned
-  large tag first, then the page-base slab header, and finally each active
-  cache's block alignment. The large path remains for requests beyond the
-  largest class and for alignments that no class can satisfy.
+  `kmalloc-4096` and `kmalloc-8192` on 4 KiB pages). Full slabs are linked
+  into a per-cache full list, so `free` and `usable_size` can locate an
+  object by walking each active cache's slab lists (active, partial and
+  full) and checking the block range; no arbitrary memory scan is needed.
+  `validate` and `destroy` now cover full slabs as well. The large path
+  remains for requests beyond the largest class and for alignments that no
+  class can satisfy.
 
 ### Compatibility
 
