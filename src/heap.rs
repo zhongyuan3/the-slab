@@ -29,10 +29,10 @@ use the_mm_core::PhysAddr;
 
 use crate::cache::CacheId;
 use crate::cache::ObjectCache;
-use crate::error::Error;
-use crate::header::SLAB_MAGIC;
+use crate::cache::SLAB_MAGIC;
 use crate::pages::PageAlloc;
 use crate::pages::PhysMap;
+use crate::Error;
 
 /// The kmalloc size classes in bytes, mirroring the kernel's
 /// `kmalloc_info` (including the 96 and 192 intermediates).
@@ -628,7 +628,7 @@ impl KernelHeap {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::header::SlabHeader;
+    use crate::cache::SlabHeader;
 
     #[test]
     fn class_index_picks_the_smallest_class() {

@@ -21,7 +21,7 @@ use core::ptr::NonNull;
 
 use the_mm_core::PageFrame;
 
-use crate::error::Error;
+use crate::Error;
 
 /// Translates between physical addresses and the address space the
 /// allocator accesses memory through.

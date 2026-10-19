@@ -5,7 +5,7 @@
 //! of the first object (after the slab header), the number of objects per
 //! slab, and the buddy order of the slab block.
 //!
-//! Each slab block starts with a slab header (see `crate::header`)
+//! Each slab block starts with a slab header (see `crate::cache`)
 //! followed by the objects; the free list pointers live inside the free
 //! objects themselves, exactly like SLUB's `set_freepointer`.
 
@@ -13,7 +13,7 @@ use core::cmp::max;
 use core::mem::align_of;
 use core::mem::size_of;
 
-use crate::error::Error;
+use crate::Error;
 
 /// Alignment required for the free list pointer stored in free objects.
 const FREE_POINTER_ALIGN: usize = align_of::<*mut u8>();

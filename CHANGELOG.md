@@ -17,8 +17,7 @@ All notable changes to this project are documented in this file.
 ### Added
 
 - **Optional `buddy` feature.** `BuddyPages`, `Zone` and the buddy error
-  mapping now live in the new `crate::buddy` module behind
-  `features = ["buddy"]`. The slab core (`ObjectCache`, `KernelHeap`,
+  mapping now live in the `buddy` module behind `features = ["buddy"]`. The slab core (`ObjectCache`, `KernelHeap`,
   `SlabLayout`, `PageAlloc`, `PhysMap`, `DirectMap`) has no buddy or
   memblock dependency.
 - `Zone::free_range` and `Zone::free_ranges` pass boot memory through to the
@@ -28,10 +27,14 @@ All notable changes to this project are documented in this file.
 
 ### Changed
 
-- **The slab core is allocator-neutral.** `crate::pages` now contains only
-  the `PageAlloc`/`PhysMap` traits and `DirectMap`; the buddy adapters moved
-  to `crate::buddy`. `cache` and `heap` import the address traits from
-  `the-mm-core`.
+- **Flattened the module layout.** Public items are exported only from the
+  crate root. The `error` and `header` modules were removed: `Error` lives
+  in `lib.rs`, and `SlabHeader`/`SLAB_MAGIC` live in `cache.rs`.
+  `SIZE_CLASSES` is now re-exported at the crate root.
+- **The slab core is allocator-neutral.** The `pages` module now contains
+  only the `PageAlloc`/`PhysMap` traits and `DirectMap`; the buddy adapters
+  moved to the `buddy` module. `cache` and `heap` import the address traits
+  from `the-mm-core`.
 - `the-buddy-system` is an optional dependency; the default feature set is
   empty. The slab library has no memblock dependency at all.
 - **PFN conversions moved to `PageFrame`.** The shared `PageFrame` trait
