@@ -61,7 +61,7 @@ implement `PageAlloc` instead.
 The examples below use the `buddy` feature:
 
 ```toml
-the-slab = { version = "0.1", features = ["buddy"] }
+the-slab = { version = "0.2", features = ["buddy"] }
 ```
 
 ```rust

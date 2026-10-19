@@ -1,6 +1,6 @@
 [package]
 name = "the-slab"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 description = "A no_std reimplementation of the Linux kernel's SLUB-style slab allocator"
 license = "MIT"
@@ -13,7 +13,7 @@ rust-version = "1.85"
 
 [dependencies]
 the-mm-core = { path = "../the-mm-core", version = "0.1.0" }
-the-buddy-system = { path = "../the-buddy-system", version = "0.1.0", optional = true }
+the-buddy-system = { path = "../the-buddy-system", version = "0.2.0", optional = true }
 
 [features]
 default = []
@@ -23,4 +23,4 @@ buddy = ["dep:the-buddy-system"]
 [dev-dependencies]
 # Integration tests exercise the explicit boot handoff; the slab library
 # itself has no memblock dependency.
-the-memblock = { path = "../the-memblock", version = "0.2.0" }
+the-memblock = { path = "../the-memblock", version = "0.3.0" }

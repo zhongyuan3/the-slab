@@ -8,8 +8,8 @@ use std::sync::Mutex;
 
 use the_buddy_system::Buddy;
 use the_buddy_system::Page;
-use the_memblock::flags::MemblockFlags;
-use the_memblock::memblock::Memblock;
+use the_memblock::Memblock;
+use the_memblock::MemblockFlags;
 use the_slab::BuddyPages;
 use the_slab::DirectMap;
 use the_slab::Error;
@@ -162,7 +162,7 @@ fn boot_handoff_from_memblock_to_slab() {
     // The boot story: memblock knows the memory, the kernel image is
     // reserved, and the rest is handed to the buddy allocator.
     let mut mb = Memblock::<usize, 16>::new();
-    mb.add(base, PAGES * PAGE, MemblockFlags::NONE).unwrap();
+    mb.add(base, PAGES * PAGE).unwrap();
     mb.reserve_kern(base, 2 * PAGE).unwrap();
 
     let mut descriptors = vec![Page::EMPTY; PAGES];
@@ -674,7 +674,7 @@ fn zone_accepts_memblock_free_ranges() {
     let base = memory.base();
 
     let mut mb = Memblock::<usize, 16>::new();
-    mb.add(base, PAGES * PAGE, MemblockFlags::NONE).unwrap();
+    mb.add(base, PAGES * PAGE).unwrap();
     mb.reserve_kern(base, 2 * PAGE).unwrap();
 
     let mut descriptors = vec![Page::EMPTY; PAGES];
