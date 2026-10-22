@@ -21,10 +21,10 @@ use the_buddy_system::Error as BuddyError;
 use the_buddy_system::Page;
 use the_mm_core::PageFrame;
 
+use crate::Error;
 use crate::pages::DirectMap;
 use crate::pages::PageAlloc;
 use crate::pages::PhysMap;
-use crate::Error;
 
 /// Pairs a borrowed buddy allocator with a physical mapping, implementing
 /// [`PageAlloc`].

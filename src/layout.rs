@@ -19,7 +19,7 @@ use crate::Error;
 const FREE_POINTER_ALIGN: usize = align_of::<*mut u8>();
 
 /// A computed slab layout.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub struct SlabLayout {
     pub(crate) object_size: usize,
     pub(crate) align: usize,
@@ -230,25 +230,33 @@ mod tests {
 
     #[test]
     fn object_larger_than_the_largest_block_is_rejected() {
-        let error = SlabLayout::new(HEADER, 1 << 20, 8, PAGE, 2, 4).unwrap_err();
+        let error = SlabLayout::new(HEADER, 1 << 20, 8, PAGE, 2, 4)
+            .err()
+            .expect("expected layout error");
         assert_eq!(error, Error::ObjectTooLarge);
     }
 
     #[test]
     fn page_aligned_objects_do_not_fit_with_a_header() {
         // The object and the header both want the full first page.
-        let error = SlabLayout::new(HEADER, PAGE, PAGE, PAGE, 0, 4).unwrap_err();
+        let error = SlabLayout::new(HEADER, PAGE, PAGE, PAGE, 0, 4)
+            .err()
+            .expect("expected layout error");
         assert_eq!(error, Error::ObjectTooLarge);
     }
 
     #[test]
     fn tiny_objects_are_rejected() {
         assert_eq!(
-            SlabLayout::new(HEADER, 4, 8, PAGE, 10, 4).unwrap_err(),
+            SlabLayout::new(HEADER, 4, 8, PAGE, 10, 4)
+                .err()
+                .expect("expected layout error"),
             Error::InvalidObjectSize
         );
         assert_eq!(
-            SlabLayout::new(HEADER, 0, 8, PAGE, 10, 4).unwrap_err(),
+            SlabLayout::new(HEADER, 0, 8, PAGE, 10, 4)
+                .err()
+                .expect("expected layout error"),
             Error::InvalidObjectSize
         );
     }
@@ -256,15 +264,21 @@ mod tests {
     #[test]
     fn bad_alignment_is_rejected() {
         assert_eq!(
-            SlabLayout::new(HEADER, 32, 0, PAGE, 10, 4).unwrap_err(),
+            SlabLayout::new(HEADER, 32, 0, PAGE, 10, 4)
+                .err()
+                .expect("expected layout error"),
             Error::InvalidAlign
         );
         assert_eq!(
-            SlabLayout::new(HEADER, 32, 3, PAGE, 10, 4).unwrap_err(),
+            SlabLayout::new(HEADER, 32, 3, PAGE, 10, 4)
+                .err()
+                .expect("expected layout error"),
             Error::InvalidAlign
         );
         assert_eq!(
-            SlabLayout::new(HEADER, 32, 8192, PAGE, 10, 4).unwrap_err(),
+            SlabLayout::new(HEADER, 32, 8192, PAGE, 10, 4)
+                .err()
+                .expect("expected layout error"),
             Error::InvalidAlign
         );
     }
@@ -272,11 +286,15 @@ mod tests {
     #[test]
     fn bad_page_size_is_rejected() {
         assert_eq!(
-            SlabLayout::new(HEADER, 32, 8, 0, 10, 4).unwrap_err(),
+            SlabLayout::new(HEADER, 32, 8, 0, 10, 4)
+                .err()
+                .expect("expected layout error"),
             Error::InvalidPageSize
         );
         assert_eq!(
-            SlabLayout::new(HEADER, 32, 8, 3000, 10, 4).unwrap_err(),
+            SlabLayout::new(HEADER, 32, 8, 3000, 10, 4)
+                .err()
+                .expect("expected layout error"),
             Error::InvalidPageSize
         );
     }

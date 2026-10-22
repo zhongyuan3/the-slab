@@ -6,6 +6,10 @@ All notable changes to this project are documented in this file.
 
 ### Breaking changes
 
+- **Removed non-essential `Debug` implementations.** `ObjectCache`,
+  `KernelHeap`, `SlabLayout`, `SlabHeader`, `LargeTag`, `CacheId` and
+  `DirectMap` no longer implement `Debug`; only `Error` keeps it. The tests
+  no longer format these types.
 - **Pointer-taking methods are now `unsafe`.** `ObjectCache::free`,
   `KernelHeap::free`, `KernelHeap::usable_size`, `KernelHeap::realloc` and
   `KernelHeap::realloc_layout` require the caller to pass a live allocation

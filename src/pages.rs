@@ -92,7 +92,7 @@ pub trait PageAlloc: PhysMap {
 ///
 /// A mapping can be defined in a `static` with [`DirectMap::uninit`] and
 /// filled in at boot with [`DirectMap::init`].
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy)]
 pub struct DirectMap<A: PageFrame> {
     phys_base: A,
     virt_base: NonNull<u8>,

@@ -597,8 +597,7 @@ fn static_zone_object_cache_and_heap_share_the_page_allocator() {
     // The descriptors are leaked (they are reachable through the zone),
     // and the memory owner is forgotten at the end of the test so the
     // backing allocation stays alive as well.
-    let descriptors: &'static mut [Page] =
-        Box::leak(vec![Page::EMPTY; PAGES].into_boxed_slice());
+    let descriptors: &'static mut [Page] = Box::leak(vec![Page::EMPTY; PAGES].into_boxed_slice());
     let memory = Memory::new(PAGES);
     let base = memory.base();
     let ptr = NonNull::new(descriptors.as_mut_ptr()).unwrap();

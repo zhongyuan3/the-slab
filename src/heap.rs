@@ -27,12 +27,12 @@ use core::ptr::NonNull;
 use the_mm_core::PageFrame;
 use the_mm_core::PhysAddr;
 
+use crate::Error;
 use crate::cache::CacheId;
 use crate::cache::ObjectCache;
 use crate::cache::SLAB_MAGIC;
 use crate::pages::PageAlloc;
 use crate::pages::PhysMap;
-use crate::Error;
 
 /// The kmalloc size classes in bytes, mirroring the kernel's
 /// `kmalloc_info` (including the 96 and 192 intermediates).
@@ -87,7 +87,6 @@ pub(crate) const LARGE_MAGIC: u32 = 0x1A26_9002;
 /// vmemmap the block itself carries it. The pointer handed to the caller
 /// starts right after the tag, so the tag is never overwritten.
 #[repr(C)]
-#[derive(Debug)]
 pub(crate) struct LargeTag {
     pub(crate) magic: u32,
     pub(crate) order: u8,
@@ -117,7 +116,6 @@ enum Located<A> {
 /// locate the owning allocation from the pointer by walking the active
 /// caches' slab lists (including full slabs) and checking the block range,
 /// then the large-block tag; no side table is needed.
-#[derive(Debug)]
 pub struct KernelHeap {
     caches: [Option<ObjectCache>; CLASS_COUNT],
     page_size: usize,
@@ -673,7 +671,7 @@ mod tests {
 
     #[test]
     fn tag_layouts_start_with_their_magic() {
-                // `free` dispatches on the first word of a page, so both the slab
+        // `free` dispatches on the first word of a page, so both the slab
         // header and the large tag must start with their magic.
         assert_eq!(core::mem::offset_of!(SlabHeader, magic), 0);
         assert_eq!(core::mem::offset_of!(LargeTag, magic), 0);

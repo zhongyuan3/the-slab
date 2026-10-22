@@ -37,10 +37,10 @@ use core::sync::atomic::Ordering;
 use the_mm_core::PageFrame;
 use the_mm_core::PhysAddr;
 
+use crate::Error;
 use crate::layout::SlabLayout;
 use crate::pages::PageAlloc;
 use crate::pages::PhysMap;
-use crate::Error;
 
 /// Magic written into every slab header and checked by `free` and
 /// `validate`.
@@ -59,7 +59,6 @@ pub(crate) const SLAB_MAGIC: u32 = 0x5AB0_9001;
 /// (this header) from a large allocation tag, so the two tag layouts must
 /// start with the same magic field.
 #[repr(C)]
-#[derive(Debug)]
 pub(crate) struct SlabHeader {
     /// Magic checked by `free` and `validate`.
     pub(crate) magic: u32,
@@ -102,7 +101,7 @@ const DEFAULT_MIN_PARTIAL: usize = 5;
 /// Ids must be unique among live caches. [`ObjectCache::init`] draws one from
 /// a process-wide counter, and [`ObjectCache::init_with_id`] lets the caller
 /// supply one explicitly (for example for reproducible tests).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub struct CacheId(usize);
 
 impl CacheId {
@@ -139,7 +138,6 @@ impl CacheId {
 /// free operations still match the stored id. The id must be unique among
 /// live caches, which [`ObjectCache::init`] ensures for caches at distinct
 /// addresses and [`ObjectCache::init_with_id`] lets the caller control.
-#[derive(Debug)]
 pub struct ObjectCache {
     name: &'static str,
     id: CacheId,
@@ -1196,7 +1194,10 @@ mod tests {
             free(&mut cache, &mut alloc, NonNull::dangling()),
             Err(Error::Uninitialized)
         ));
-        assert!(matches!(cache.shrink(&mut alloc), Err(Error::Uninitialized)));
+        assert!(matches!(
+            cache.shrink(&mut alloc),
+            Err(Error::Uninitialized)
+        ));
         assert!(matches!(cache.validate(&alloc), Err(Error::Uninitialized)));
         assert!(matches!(
             cache.destroy(&mut alloc),
